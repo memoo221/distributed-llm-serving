@@ -1,5 +1,5 @@
 # CSE354 — Distributed LLM Serving System
-**Ain Shams University | Faculty of Engineering | 2nd Semester 2025/2026**
+**Ain Shams University | Faculty of Engineering**
 
 
 ## Project Structure
