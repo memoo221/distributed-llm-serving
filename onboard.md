@@ -190,28 +190,22 @@ curl http://localhost:9001/health
 
 ## GPU Worker Nodes (Kaggle)
 
-Two real GPU worker nodes run on Kaggle Tesla T4s, exposed via private Cloudflare Tunnel. They serve real LLM inference and plug into the master tier as remote workers.
+Two GPU worker nodes run on Kaggle Tesla T4s, exposed via ngrok tunnels. They serve real LLM inference and plug into the master tier as remote workers.
 
 ### Endpoints
 
-| Worker | Hostname | GPU | Model |
-|---|---|---|---|
-| `worker_1.1` | `$WORKER1_URL` | Tesla T4 (16 GB) | Qwen 2.5 0.5B Instruct |
-| `worker_1.2` | `$WORKER2_URL` | Tesla T4 (16 GB) | Qwen 2.5 0.5B Instruct |
+URLs are **dynamic** — ngrok generates new URLs on every Kaggle session restart. After starting the workers in the Kaggle notebook, the launch cell prints the current URLs. Paste them into the master's worker registry.
 
-Actual hostnames live in `.env` / team password manager. **Do not hardcode them in source or docs.**
+| Worker | URL source | GPU | Model |
+|---|---|---|---|
+| `worker_1.1` | printed by Kaggle notebook | Tesla T4 (16 GB) | Qwen 2.5 0.5B Instruct |
+| `worker_1.2` | printed by Kaggle notebook | Tesla T4 (16 GB) | Qwen 2.5 0.5B Instruct |
 
 ### Required environment variables
 
-Copy `.env.example` to `.env` and fill values from the team vault:
+Copy `.env.example` to `.env` and fill `WORKER_API_KEY` from the team vault.
 
-```
-WORKER1_URL=
-WORKER2_URL=
-WORKER_API_KEY=
-```
-
-All `/generate` calls require the header:
+All `/generate` and `/stats` calls require the header:
 
 ```
 X-API-Key: $WORKER_API_KEY
@@ -219,7 +213,7 @@ X-API-Key: $WORKER_API_KEY
 
 ### API
 
-Each GPU worker exposes:
+Each worker exposes:
 
 - `GET /health` — status + GPU stats (no auth)
 - `GET /stats` — same payload, requires `X-API-Key`
@@ -228,7 +222,7 @@ Each GPU worker exposes:
 ### Generate example
 
 ```powershell
-curl -X POST $env:WORKER1_URL/generate `
+curl -X POST <ngrok-url-from-notebook>/generate `
   -H "Content-Type: application/json" `
   -H "X-API-Key: $env:WORKER_API_KEY" `
   -d '{\"question\": \"What is distributed computing?\"}'
@@ -238,13 +232,14 @@ curl -X POST $env:WORKER1_URL/generate `
 
 - **Dynamic batching** (50ms window, batch size 8) — measured 13× throughput vs. single-request mode (16 → 212 tokens/sec).
 - **GPU telemetry** in every response: per-request memory, output tokens, batch size, tokens/sec. `/health` adds GPU utilization %, VRAM, temperature.
+- **Heartbeats** — when `MASTER_URL` is set, workers POST status every 5s for auto-discovery.
 - **Load-tested**: 256 concurrent requests with zero errors. Sweet spot ~16 concurrent per worker, ~3.5 req/sec sustained.
 
 ### Session constraints
 
 - Kaggle sessions cap at ~9h wall-clock and idle out after ~20min.
-- Tunnel hostnames are fixed — URLs persist across kernel restarts.
-- If a GPU worker returns 502/504, the Kaggle session has died. Ping the worker maintainer to restart.
+- ngrok URLs change every session — refresh the master's worker config after each restart.
+- If a worker returns 502, the Kaggle session has died. Ping the worker maintainer to restart.
 
 ### Per-worker limits
 
