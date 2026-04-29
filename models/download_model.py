@@ -13,4 +13,7 @@ snapshot_download(
     local_dir=LOCAL_DIR,
     ignore_patterns=["*.msgpack", "*.h5", "flax_model*", "tf_model*"],
 )
+
+
+
 print("Done. Model saved to:", LOCAL_DIR)
