@@ -10,6 +10,7 @@ import httpx
 
 async def fetch_one(client: httpx.AsyncClient, url: str, index: int) -> dict[str, Any]:
     try:
+        
         response = await client.get(url)
         payload = response.json() if "application/json" in response.headers.get("content-type", "") else {}
         return {
