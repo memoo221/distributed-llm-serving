@@ -9,8 +9,8 @@ services:
     depends_on:
       - master1
       - master2
-      - master3
-      - master4
+      # - master3
+      # - master4
 
   master1:
     build:
@@ -28,18 +28,18 @@ services:
     environment:
       MASTER_ID: master2
 
-  master3:
-    build:
-      context: .
-      dockerfile: master/Dockerfile.mock
-    container_name: master3
-    environment:
-      MASTER_ID: master3
+  # master3:
+  #   build:
+  #     context: .
+  #     dockerfile: master/Dockerfile.mock
+  #   container_name: master3
+  #   environment:
+  #     MASTER_ID: master3
 
-  master4:
-    build:
-      context: .
-      dockerfile: master/Dockerfile.mock
-    container_name: master4
-    environment:
-      MASTER_ID: master4
+  # master4:
+  #   build:
+  #     context: .
+  #     dockerfile: master/Dockerfile.mock
+  #   container_name: master4
+  #   environment:
+  #     MASTER_ID: master4
