@@ -8,4 +8,4 @@ COPY master/mock_api.py /app/master/mock_api.py
 COPY master/routers/mock_api.py /app/master/routers/mock_api.py
 COPY master/routers/__init__.py /app/master/routers/__init__.py
 
-CMD ["uvicorn", "master.mock_api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "master.mock_api:app", "--host", "0.0.0.0", "--port", "7000"]
