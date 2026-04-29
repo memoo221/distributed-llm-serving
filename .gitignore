@@ -8,3 +8,7 @@ docs/results/*.png
 *.egg-info/
 .pytest_cache/
 .DS_Store
+models/tinyllama-1.1b-chat/
+models/qwen2.5-0.5b/
+models/*.bin
+models/*.safetensors
