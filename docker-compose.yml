@@ -1,0 +1,45 @@
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: distributed-nginx
+    ports:
+      - "8008:8008"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - master1
+      - master2
+      - master3
+      - master4
+
+  master1:
+    build:
+      context: .
+      dockerfile: master/Dockerfile.mock
+    container_name: master1
+    environment:
+      MASTER_ID: master1
+
+  master2:
+    build:
+      context: .
+      dockerfile: master/Dockerfile.mock
+    container_name: master2
+    environment:
+      MASTER_ID: master2
+
+  master3:
+    build:
+      context: .
+      dockerfile: master/Dockerfile.mock
+    container_name: master3
+    environment:
+      MASTER_ID: master3
+
+  master4:
+    build:
+      context: .
+      dockerfile: master/Dockerfile.mock
+    container_name: master4
+    environment:
+      MASTER_ID: master4
