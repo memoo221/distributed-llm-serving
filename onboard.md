@@ -94,6 +94,70 @@ Expected:
 - `8008`: NGINX load balancer
 - `7000`: mock master node services
 
+---
+
+## LLM Models Setup
+
+### Download Models
+
+Models are stored locally and are **not pushed to GitHub** (excluded via `.gitignore`).
+
+**TinyLlama 1.1B Chat** (~2.2 GB):
+```powershell
+python models/download_model.py
+```
+Saves to: `models/tinyllama-1.1b-chat/`
+
+**Qwen 2.5 0.5B** (~1 GB):
+```powershell
+python models/download_qwen.py
+```
+Saves to: `models/qwen2.5-0.5b/`
+
+> Both scripts resume automatically if the download is interrupted.
+
+---
+
+### Starting the Worker Server
+
+The worker exposes a `/generate` endpoint that accepts a question and returns an LLM response.
+
+**Default (TinyLlama):**
+```powershell
+uvicorn workers.worker_router:app --host 0.0.0.0 --port 9001 --reload
+```
+
+**With Qwen instead:**
+```powershell
+$env:MODEL_PATH="models/qwen2.5-0.5b"; uvicorn workers.worker_router:app --host 0.0.0.0 --port 9001 --reload
+```
+
+**Test the endpoint:**
+```powershell
+curl -X POST http://localhost:9001/generate `
+  -H "Content-Type: application/json" `
+  -d '{\"question\": \"What is the capital of France?\"}'
+```
+
+Expected response:
+```json
+{
+  "question": "What is the capital of France?",
+  "answer": "The capital of France is Paris."
+}
+```
+
+**Health check:**
+```powershell
+curl http://localhost:9001/health
+```
+
+> On CPU, responses take 30–120 seconds. On a CUDA GPU, install:
+> `pip install torch --index-url https://download.pytorch.org/whl/cu121`
+> and the model will run in 1–3 seconds automatically.
+
+---
+
 **Optional Local Backend Run**
 If someone wants to run the separate backend app manually outside the Docker mock stack:
 ```powershell
