@@ -47,12 +47,28 @@ services:
   cpu_worker:
     build:
       context: .
-      dockerfile: Dockerfile.cpu
+      dockerfile: workers/Dockerfile.cpu
     container_name: cpu_worker
     environment:
       - MODEL_PATH=/app/models/qwen2.5-0.5b
+      - WORKER_ID=worker_1
     ports:
       - "9001:9001"
     volumes:
       - ./models:/app/models:ro
     restart: unless-stopped
+
+  cpu_worker_2:
+      build:
+        context: .
+        dockerfile: workers/Dockerfile.cpu
+      container_name: cpu_worker_2
+      environment:
+        - MODEL_PATH=/app/models/qwen2.5-0.5b
+        - WORKER_ID=worker_2
+      ports:
+        - "9002:9001"
+      volumes:
+        - ./models:/app/models:ro
+      restart: unless-stopped
+

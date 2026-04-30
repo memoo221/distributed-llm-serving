@@ -1,0 +1,114 @@
+version: '3.8'
+
+services:
+  cpu_worker_1:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    container_name: cpu_worker_1
+    environment:
+      - MODEL_PATH=/app/models/qwen2.5-0.5b
+      - WORKER_ID=worker_1
+    ports:
+      - "9001:9001"
+    volumes:
+      - ./models:/app/models:ro
+    restart: unless-stopped
+
+  cpu_worker_2:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    container_name: cpu_worker_2
+    environment:
+      - MODEL_PATH=/app/models/qwen2.5-0.5b
+      - WORKER_ID=worker_2
+    ports:
+      - "9002:9001"
+    volumes:
+      - ./models:/app/models:ro
+    restart: unless-stopped
+
+  cpu_worker_3:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    container_name: cpu_worker_3
+    environment:
+      - MODEL_PATH=/app/models/qwen2.5-0.5b
+      - WORKER_ID=worker_3
+    ports:
+      - "9003:9001"
+    volumes:
+      - ./models:/app/models:ro
+    restart: unless-stopped
+
+  cpu_worker_4:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    container_name: cpu_worker_4
+    environment:
+      - MODEL_PATH=/app/models/qwen2.5-0.5b
+      - WORKER_ID=worker_4
+    ports:
+      - "9004:9001"
+    volumes:
+      - ./models:/app/models:ro
+    restart: unless-stopped
+
+  cpu_worker_5:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    container_name: cpu_worker_5
+    environment:
+      - MODEL_PATH=/app/models/qwen2.5-0.5b
+      - WORKER_ID=worker_5
+    ports:
+      - "9005:9001"
+    volumes:
+      - ./models:/app/models:ro
+    restart: unless-stopped
+
+  cpu_worker_6:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    container_name: cpu_worker_6
+    environment:
+      - MODEL_PATH=/app/models/qwen2.5-0.5b
+      - WORKER_ID=worker_6
+    ports:
+      - "9006:9001"
+    volumes:
+      - ./models:/app/models:ro
+    restart: unless-stopped
+
+  cpu_worker_7:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    container_name: cpu_worker_7
+    environment:
+      - MODEL_PATH=/app/models/qwen2.5-0.5b
+      - WORKER_ID=worker_7
+    ports:
+      - "9007:9001"
+    volumes:
+      - ./models:/app/models:ro
+    restart: unless-stopped
+
+  cpu_worker_8:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    container_name: cpu_worker_8
+    environment:
+      - MODEL_PATH=/app/models/qwen2.5-0.5b
+      - WORKER_ID=worker_8
+    ports:
+      - "9008:9001"
+    volumes:
+      - ./models:/app/models:ro
+    restart: unless-stopped
