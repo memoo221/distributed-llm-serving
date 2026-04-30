@@ -54,6 +54,37 @@ def health() -> dict[str, Any]:
     }
 
 
+_HEARTBEATS: dict[str, dict[str, Any]] = {}
+
+
+@router.post("/heartbeat")
+def heartbeat(payload: dict[str, Any]) -> dict[str, Any]:
+    """
+    Receive a heartbeat from a worker. Mock implementation: store the latest
+    payload per worker_id and log it. Returns ack with current master id.
+    """
+    worker_id = payload.get("worker_id", "unknown")
+    received_at = time.time()
+    _HEARTBEATS[worker_id] = {**payload, "received_at": received_at}
+    print(
+        f"[{MASTER_ID}] heartbeat from worker_id={worker_id} "
+        f"device_type={payload.get('device_type')} "
+        f"total_requests={payload.get('total_requests')} "
+        f"errors={payload.get('total_errors')}"
+    )
+    return {"status": "ok", "master_id": MASTER_ID, "received_at": received_at}
+
+
+@router.get("/heartbeat/workers")
+def list_workers() -> dict[str, Any]:
+    """Inspect the most recent heartbeat seen for each worker."""
+    return {
+        "master_id": MASTER_ID,
+        "workers": _HEARTBEATS,
+        "count": len(_HEARTBEATS),
+    }
+
+
 @router.post("/generate")
 def generate(payload: GenerateRequest, request: Request) -> dict[str, Any]:
     _sleep_if_requested(payload.delay_ms)
