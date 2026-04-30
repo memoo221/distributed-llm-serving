@@ -8,5 +8,6 @@ __pycache__
 venv
 logs
 llm/models
+models
 docs
 tests
