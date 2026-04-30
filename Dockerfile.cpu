@@ -1,0 +1,32 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy minimal worker requirements
+COPY requirements-worker.txt ./
+
+# Install Python tools
+RUN pip install --upgrade pip setuptools wheel
+
+# Install CPU-only PyTorch FIRST (before other deps that depend on it)
+RUN pip install --no-cache-dir torch>=2.2.0 --index-url https://download.pytorch.org/whl/cpu
+
+# Install remaining Python deps (transformers, fastapi, etc.)
+# torch is already installed, so pip won't try to download CUDA version
+RUN pip install --no-cache-dir -r requirements-worker.txt
+
+# Copy app
+COPY . /app
+
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 9001
+
+# Default command: run the worker FastAPI app
+CMD ["uvicorn", "workers.worker_router:app", "--host", "0.0.0.0", "--port", "9001"]

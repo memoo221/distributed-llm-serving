@@ -43,3 +43,16 @@ services:
   #   container_name: master4
   #   environment:
   #     MASTER_ID: master4
+
+  cpu_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    container_name: cpu_worker
+    environment:
+      - MODEL_PATH=/app/models/qwen2.5-0.5b
+    ports:
+      - "9001:9001"
+    volumes:
+      - ./models:/app/models:ro
+    restart: unless-stopped
