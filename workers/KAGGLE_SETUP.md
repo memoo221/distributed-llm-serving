@@ -1,6 +1,6 @@
 # Running GPU Workers on Kaggle
 
-This document explains how to spin up `worker.py` on Kaggle's free 2× T4 GPUs and expose them publicly via ngrok. The notebook itself is **not committed** to this repo (Kaggle-specific, depends on per-account secrets). Follow these steps to set up your own.
+This document explains how to spin up `kaggle_worker.py` on Kaggle's free 2× T4 GPUs and expose them publicly via ngrok. The notebook itself is **not committed** to this repo (Kaggle-specific, depends on per-account secrets). Follow these steps to set up your own.
 
 ## Prerequisites
 
@@ -70,9 +70,9 @@ env = {
 
 w1_log = open("/kaggle/working/w1.log", "w")
 w2_log = open("/kaggle/working/w2.log", "w")
-w1 = subprocess.Popen(["python", "-u", "worker.py", "worker_1.1", "cuda:0", "8000"],
+w1 = subprocess.Popen(["python", "-u", "kaggle_worker.py", "worker_1.1", "cuda:0", "8000"],
                      env=env, stdout=w1_log, stderr=subprocess.STDOUT)
-w2 = subprocess.Popen(["python", "-u", "worker.py", "worker_1.2", "cuda:1", "8001"],
+w2 = subprocess.Popen(["python", "-u", "kaggle_worker.py", "worker_1.2", "cuda:1", "8001"],
                      env=env, stdout=w2_log, stderr=subprocess.STDOUT)
 
 print("Waiting 30s for workers...")
