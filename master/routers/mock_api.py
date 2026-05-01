@@ -3,8 +3,10 @@ import socket
 import time
 from typing import Any
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+
+from master.services.forwarder import AllRetriesFailed, NoWorkerAvailable
 
 
 MASTER_ID = os.getenv("MASTER_ID", "master-unknown")
@@ -27,19 +29,13 @@ def _base_payload() -> dict[str, Any]:
     }
 
 
-def _sleep_if_requested(delay_ms: int) -> None:
-    if delay_ms > 0:
-        time.sleep(delay_ms / 1000)
-
-
 @router.get("/")
-def root(
+async def root(
     request: Request,
     delay_ms: int = Query(default=0, ge=0, le=10000),
 ) -> dict[str, Any]:
-    _sleep_if_requested(delay_ms)
     return {
-        "message": "request served by mock master",
+        "message": "request served by master",
         **_base_payload(),
         "path": str(request.url.path),
         "delay_ms": delay_ms,
@@ -47,55 +43,74 @@ def root(
 
 
 @router.get("/health")
-def health() -> dict[str, Any]:
-    return {
-        "status": "ok",
-        **_base_payload(),
-    }
-
-
-_HEARTBEATS: dict[str, dict[str, Any]] = {}
+async def health() -> dict[str, Any]:
+    return {"status": "ok", **_base_payload()}
 
 
 @router.post("/heartbeat")
-def heartbeat(payload: dict[str, Any]) -> dict[str, Any]:
-    """
-    Receive a heartbeat from a worker. Mock implementation: store the latest
-    payload per worker_id and log it. Returns ack with current master id.
-    """
-    worker_id = payload.get("worker_id", "unknown")
-    received_at = time.time()
-    _HEARTBEATS[worker_id] = {**payload, "received_at": received_at}
-    print(
-        f"[{MASTER_ID}] heartbeat from worker_id={worker_id} "
-        f"device_type={payload.get('device_type')} "
-        f"total_requests={payload.get('total_requests')} "
-        f"errors={payload.get('total_errors')}"
-    )
-    return {"status": "ok", "master_id": MASTER_ID, "received_at": received_at}
+async def heartbeat(payload: dict[str, Any], request: Request) -> dict[str, Any]:
+    await request.app.state.registry.update(payload)
+    return {"status": "ok", "master_id": MASTER_ID}
 
 
 @router.get("/heartbeat/workers")
-def list_workers() -> dict[str, Any]:
-    """Inspect the most recent heartbeat seen for each worker."""
+async def list_workers(request: Request) -> dict[str, Any]:
+    registry = request.app.state.registry
+    workers = registry.all()
     return {
         "master_id": MASTER_ID,
-        "workers": _HEARTBEATS,
-        "count": len(_HEARTBEATS),
+        "workers": {w.worker_id: w.raw for w in workers},
+        "count": len(workers),
     }
 
 
 @router.post("/generate")
-def generate(payload: GenerateRequest, request: Request) -> dict[str, Any]:
-    _sleep_if_requested(payload.delay_ms)
+async def generate(payload: GenerateRequest, request: Request) -> dict[str, Any]:
+    registry = request.app.state.registry
+    forwarder = request.app.state.forwarder
+
+    try:
+        result = await forwarder.forward_generate(
+            registry,
+            payload.prompt,
+            payload.max_new_tokens,
+        )
+    except NoWorkerAvailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except AllRetriesFailed as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "all_workers_failed", "tried": exc.tried},
+        )
+
     return {
-        "response": f"mock response from {MASTER_ID}",
-        "request": payload.model_dump(),
-        "request_meta": {
-            "path": str(request.url.path),
-            "x_forwarded_for": request.headers.get("x-forwarded-for"),
-            "x_request_id": request.headers.get("x-request-id"),
-            "host": request.headers.get("host"),
-        },
+        "response": result.get("answer") or result.get("response"),
+        "worker_id": result.get("worker_id"),
         **_base_payload(),
+    }
+
+
+@router.get("/scheduler/workers")
+async def scheduler_debug(request: Request) -> dict[str, Any]:
+    """Admin endpoint: live scheduler view of all workers."""
+    import time as _time
+    registry = request.app.state.registry
+    now = _time.monotonic()
+    workers = registry.all()
+    return {
+        "master_id": MASTER_ID,
+        "workers": [
+            {
+                "worker_id": w.worker_id,
+                "url": w.url,
+                "device_type": w.device_type,
+                "active_requests": w.active_requests,
+                "queue_depth": w.queue_depth,
+                "effective_load": round(w.effective_load, 3),
+                "slots": w.slots,
+                "last_seen_sec_ago": round(now - w.last_seen_monotonic, 1),
+                "in_cooldown": now < w.failure_cooldown_until,
+            }
+            for w in workers
+        ],
     }
