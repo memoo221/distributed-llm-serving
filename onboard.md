@@ -7,7 +7,7 @@ This project implements a distributed system for handling concurrent LLM inferen
 Current request flow:
 
 ```
-Client → NGINX:8008 → Master Nodes:7000 → Worker Nodes
+Client → NGINX:8008 → Master Nodes:7000 → Worker Nodes (local CPU + remote Kaggle GPU)
 ```
 
 ---
@@ -143,40 +143,37 @@ Saves to: `models/qwen2.5-0.5b/`
 
 ---
 
-### Starting the worker server
+### Starting a local worker
 
-The worker exposes a `/generate` endpoint that accepts a question and returns an LLM response.
-
-**Default (TinyLlama):**
+Run the generic worker (CPU or any local CUDA device):
 
 ```powershell
-uvicorn workers.worker_router:app --host 0.0.0.0 --port 9001 --reload
+$env:WORKER_API_KEY="<from team vault>"
+python workers/worker.py cpu_worker_1 cpu 9001
 ```
 
-**With Qwen instead:**
-
-```powershell
-$env:MODEL_PATH="models/qwen2.5-0.5b"; uvicorn workers.worker_router:app --host 0.0.0.0 --port 9001 --reload
-```
+Args: `worker_id`, `device` (`cpu` / `cuda:0` / `cuda:1`), `port`.
 
 **Test the endpoint:**
 
 ```powershell
 curl -X POST http://localhost:9001/generate `
   -H "Content-Type: application/json" `
+  -H "X-API-Key: $env:WORKER_API_KEY" `
   -d '{\"question\": \"What is the capital of France?\"}'
 ```
 
-Expected response:
+Expected response shape (see Worker API Contract below):
 
 ```json
 {
-  "question": "What is the capital of France?",
-  "answer": "The capital of France is Paris."
+  "worker_id": "cpu_worker_1",
+  "response": "The capital of France is Paris.",
+  "stats": { "latency_ms": 1432.1, "output_tokens": 8 }
 }
 ```
 
-**Health check:**
+**Health check (no auth required):**
 
 ```powershell
 curl http://localhost:9001/health
@@ -190,20 +187,47 @@ curl http://localhost:9001/health
 
 ## GPU Worker Nodes (Kaggle)
 
-Two GPU worker nodes run on Kaggle Tesla T4s, exposed via ngrok tunnels. They serve real LLM inference and plug into the master tier as remote workers.
+Two GPU worker nodes run on Kaggle Tesla T4s. Both are exposed publicly through a single ngrok tunnel that fronts an in-cluster reverse proxy on the Kaggle host. The proxy uses path-based routing to send `/w1/*` to worker_1.1 (port 8000) and `/w2/*` to worker_1.2 (port 8001).
+
+Full deployment walkthrough: [`workers/KAGGLE_SETUP.md`](workers/KAGGLE_SETUP.md).
+
+### Architecture
+
+```
+master ──▶ https://<ngrok>.ngrok-free.app/w1/*  ──▶  Kaggle proxy:7000  ──▶  worker_1.1:8000 (T4 #0)
+       └─▶ https://<ngrok>.ngrok-free.app/w2/*  ──▶  Kaggle proxy:7000  ──▶  worker_1.2:8001 (T4 #1)
+```
+
+The single-tunnel + proxy design exists because free-tier ngrok caps at one simultaneous tunnel per account. The proxy adds ~1 ms per request (negligible vs. ~600 ms inference) and demonstrates the same Layer 7 path-routing pattern as NGINX in the master tier.
 
 ### Endpoints
 
-URLs are **dynamic** — ngrok generates new URLs on every Kaggle session restart. After starting the workers in the Kaggle notebook, the launch cell prints the current URLs. Paste them into the master's worker registry.
+URLs are **dynamic** — ngrok generates a new public URL on every Kaggle session restart. After starting the notebook, the proxy cell prints the current URLs. Paste them into the master's worker registry.
 
-| Worker | URL source | GPU | Model |
+| Worker | URL pattern | GPU | Model |
 |---|---|---|---|
-| `worker_1.1` | printed by Kaggle notebook | Tesla T4 (16 GB) | Qwen 2.5 0.5B Instruct |
-| `worker_1.2` | printed by Kaggle notebook | Tesla T4 (16 GB) | Qwen 2.5 0.5B Instruct |
+| `worker_1.1` | `<ngrok-url>/w1` | Tesla T4 (16 GB) | Qwen 2.5 0.5B Instruct |
+| `worker_1.2` | `<ngrok-url>/w2` | Tesla T4 (16 GB) | Qwen 2.5 0.5B Instruct |
+
+Example master worker registry entry:
+
+```json
+{
+  "workers": [
+    {"id": "worker_1.1", "url": "https://<ngrok-url>/w1"},
+    {"id": "worker_1.2", "url": "https://<ngrok-url>/w2"}
+  ]
+}
+```
 
 ### Required environment variables
 
-Copy `.env.example` to `.env` and fill `WORKER_API_KEY` from the team vault.
+Copy `.env.example` to `.env` and fill values from the team vault:
+
+```
+WORKER_API_KEY=          # required for /generate and /stats
+MASTER_URL=              # optional, enables worker → master heartbeats
+```
 
 All `/generate` and `/stats` calls require the header:
 
@@ -213,7 +237,7 @@ X-API-Key: $WORKER_API_KEY
 
 ### API
 
-Each worker exposes:
+Each GPU worker (reachable via `<ngrok-url>/w1` or `/w2`) exposes:
 
 - `GET /health` — status + GPU stats (no auth)
 - `GET /stats` — same payload, requires `X-API-Key`
@@ -222,7 +246,7 @@ Each worker exposes:
 ### Generate example
 
 ```powershell
-curl -X POST <ngrok-url-from-notebook>/generate `
+curl -X POST https://<ngrok-url>.ngrok-free.app/w1/generate `
   -H "Content-Type: application/json" `
   -H "X-API-Key: $env:WORKER_API_KEY" `
   -d '{\"question\": \"What is distributed computing?\"}'
@@ -230,16 +254,16 @@ curl -X POST <ngrok-url-from-notebook>/generate `
 
 ### Worker capabilities
 
-- **Dynamic batching** (50ms window, batch size 8) — measured 13× throughput vs. single-request mode (16 → 212 tokens/sec).
+- **Dynamic batching** (50 ms window, batch size 8) — measured 13× throughput vs. single-request mode (16 → 212 tokens/sec).
 - **GPU telemetry** in every response: per-request memory, output tokens, batch size, tokens/sec. `/health` adds GPU utilization %, VRAM, temperature.
-- **Heartbeats** — when `MASTER_URL` is set, workers POST status every 5s for auto-discovery.
+- **Heartbeats** — when `MASTER_URL` is set, workers POST status every 5s for auto-discovery and load-aware routing.
 - **Load-tested**: 256 concurrent requests with zero errors. Sweet spot ~16 concurrent per worker, ~3.5 req/sec sustained.
 
 ### Session constraints
 
-- Kaggle sessions cap at ~9h wall-clock and idle out after ~20min.
+- Kaggle sessions cap at ~9h wall-clock and idle out after ~20 min.
 - ngrok URLs change every session — refresh the master's worker config after each restart.
-- If a worker returns 502, the Kaggle session has died. Ping the worker maintainer to restart.
+- If a worker returns 502, the Kaggle kernel has died. Ping the worker maintainer to restart.
 
 ### Per-worker limits
 
@@ -254,7 +278,7 @@ curl -X POST <ngrok-url-from-notebook>/generate `
 
 ## Worker API Contract
 
-All worker nodes (local CPU, Kaggle GPU, mock) MUST expose the same API so the master can route to any of them interchangeably.
+All worker nodes (local CPU, Kaggle GPU, mock) **MUST** expose the same API so the master can route to any of them interchangeably.
 
 ### `GET /health`
 
@@ -269,7 +293,11 @@ Returns worker status. No authentication.
 }
 ```
 
-Optional fields when available: `gpu_util_pct`, `vram_used_mb`, `queue_depth`, `total_requests`, `total_errors`.
+Optional fields when available: `gpu_util_pct`, `vram_used_mb`, `vram_total_mb`, `queue_depth`, `total_requests`, `total_errors`, `batching`, `batch_size`.
+
+### `GET /stats`
+
+Same shape as `/health`. Requires `X-API-Key` header.
 
 ### `POST /generate`
 
@@ -297,7 +325,9 @@ Runs inference. Requires `X-API-Key` header on remote workers.
 }
 ```
 
-`stats` may include additional fields when available: `batch_size`, `peak_mem_mb`, `per_request_mem_mb`, `tokens_per_sec`.
+`stats` may include additional fields when available: `batch_size`, `peak_mem_mb`, `per_request_mem_mb`, `tokens_per_sec`, `batch_tokens_per_sec`.
+
+> The legacy `workers/worker_router.py` returns `{question, answer}` — this needs to be aligned to the contract above before the master can route to both local and Kaggle workers from the same code path. Tracked separately.
 
 ---
 
@@ -323,6 +353,7 @@ docker compose up --build -d
 ```
 
 - `.env` must never be committed. `.env.example` documents the required variables.
+- The Kaggle notebook itself is not committed (it depends on per-account Kaggle Secrets and ngrok tokens). Setup steps are reproducible from `workers/KAGGLE_SETUP.md`.
 
 ---
 
@@ -330,7 +361,9 @@ docker compose up --build -d
 
 - ✅ NGINX load balancer with 4 mock masters (Docker)
 - ✅ Worker server skeleton (`workers/worker_router.py`)
-- ✅ Two real GPU workers on Kaggle (Tesla T4)
+- ✅ Generic worker (`workers/worker.py`) with batching, GPU telemetry, heartbeats
+- ✅ Two real GPU workers on Kaggle (Tesla T4) via ngrok proxy
+- ✅ Load-test data: 256 concurrent, zero errors, knee at N=16
 - ⏳ Real master-node scheduling and worker registry
 - ⏳ Heartbeat-based health monitoring on the master
 - ⏳ Load-aware routing across heterogeneous workers (GPU + CPU)
