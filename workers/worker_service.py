@@ -1,5 +1,6 @@
 import asyncio
 import os
+from pyexpat.errors import messages
 import threading
 import time
 import uuid
@@ -148,13 +149,28 @@ class WorkerNode:
         except Exception as e:
             print(f"[WorkerNode] Error loading model: {e}")
             raise
+        
+    def _build_prompt(self, question: str) -> str:
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant. Answer clearly and concisely in English."},
+            {"role": "user", "content": question},
+        ]
+
+        prompt = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+
+        return prompt
+    
     
     def generate_single(
         self, 
         prompt: str, 
         max_new_tokens: int = 256,
-        temperature: float = 0.7,
-        top_p: float = 0.9,
+        temperature: float = 0.5,
+        top_p: float = 0.8,
         **kwargs
     ) -> str:
         """
@@ -175,7 +191,7 @@ class WorkerNode:
         
         self.total_requests += 1
         
-        try:
+        try:    
             inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
             
             with torch.no_grad():
@@ -185,6 +201,8 @@ class WorkerNode:
                     temperature=temperature,
                     top_p=top_p,
                     do_sample=True,
+                    repetition_penalty=1.2,
+                    no_repeat_ngram_size=3,
                     pad_token_id=self.tokenizer.eos_token_id,
                     **kwargs
                 )
@@ -291,7 +309,8 @@ class WorkerNode:
                 raise
         else:
             # CPU mode: local inference
-            return self.generate_single(prompt, max_new_tokens, temperature, top_p, **kwargs)
+            full_prompt = self._build_prompt(prompt)
+            return self.generate_single(full_prompt, max_new_tokens, temperature, top_p, **kwargs)
     
     def generate_concurrent(
         self,

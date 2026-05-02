@@ -22,14 +22,14 @@ This local Docker stack validates NGINX load balancing across 4 mock master node
 - 4 simulated master nodes: `master1`, `master2`, `master3`, `master4`
 - Each mock master runs a lightweight FastAPI service on port `7000`
 - A traffic simulation script to verify request distribution across masters
-- Mock master routes refactored into `master/routers/mock_api.py`
+- Mock master routes refactored into `master/routers/master_router.py`
 
 ### Files
 
 - `docker-compose.yml`
 - `nginx/nginx.conf`
 - `master/Dockerfile.mock`
-- `master/mock_api.py`
+- `master/master_router.py`
 - `master/routers/mock_api.py`
 - `tests/simulate_nginx_lb.py`
 - `.dockerignore`

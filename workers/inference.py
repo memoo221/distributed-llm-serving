@@ -38,7 +38,7 @@ def load_model(model_path: str, device: str = "cuda:0"):
 
     _model = AutoModelForCausalLM.from_pretrained(
         model_path,
-        torch_dtype=torch.float16 if "cuda" in _device else torch.float32,
+        torch_dtype=torch.float16 if "cuda" in _device else torch.bfloat16,
     ).to(_device)
     _model.eval()
 
