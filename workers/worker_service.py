@@ -22,7 +22,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 class WorkerNode:
     """
-    Unified worker node that supports both GPU (Kaggle) and CPU execution.
+    Unified worker node that supports both GPU (Groq) and CPU execution.
     Handles model loading, inference, device management, and GPU monitoring.
     """
     
@@ -41,16 +41,16 @@ class WorkerNode:
         
         Args:
             model_path: Path to the model (HuggingFace model ID or local path)
-            device: Device to use. 
-                - "cuda:0", "cuda:1", etc: Use GPU (works with remote/tunnel connections)
+            device: Device to use.
+                - "cuda:0", "cuda:1", etc: Use GPU (routes to a remote Groq worker endpoint)
                 - "cpu": Use CPU
                 - None: Auto-detect (prefers GPU if available locally)
-                NOTE: When using tunnels (e.g., Kaggle), explicitly set device="cuda:0"
-                      and we won't check local CUDA availability.
+                NOTE: For GPU mode, explicitly set device="cuda:0" so we skip the
+                      local CUDA availability check (the remote endpoint owns the GPU).
             batch_mode: Whether to enable batching
             max_batch_size: Maximum batch size for inference
-            remote_endpoint: For GPU mode, the URL of the remote Kaggle worker endpoint
-                           (e.g., "http://localhost:9001" or ngrok URL from Kaggle)
+            remote_endpoint: For GPU mode, the URL of the Groq worker endpoint
+                           (e.g., "http://localhost:9001")
         """
         self.model_path = model_path
         self.batch_mode = batch_mode
@@ -91,7 +91,7 @@ class WorkerNode:
         Select device for inference.
         
         If device is explicitly specified (e.g., "cuda:0"), trust it without checking local CUDA.
-        This is important when using tunnels to remote GPU (e.g., Kaggle).
+        This is important when routing to a remote GPU worker (e.g., Groq).
         Only auto-detect when device is None.
         """
         if device is None:
@@ -226,12 +226,12 @@ class WorkerNode:
     async def _call_remote_endpoint(
         self, prompt: str, max_new_tokens: int = 256, client: Optional[httpx.AsyncClient] = None
     ) -> str:
-        """Call the remote Kaggle worker endpoint. Reuses `client` if provided."""
+        """Call the remote Groq worker /generate endpoint. Reuses `client` if provided."""
         if not self.remote_endpoint:
             raise RuntimeError("Remote endpoint not configured for GPU mode")
 
         url = f"{self.remote_endpoint}/generate"
-        payload = {"question": prompt, "max_new_tokens": max_new_tokens}
+        payload = {"prompt": prompt, "max_new_tokens": max_new_tokens}
         headers = self._remote_headers()
 
         try:
@@ -256,7 +256,7 @@ class WorkerNode:
             return await asyncio.gather(*tasks)
 
     def _call_remote_endpoint_sync(self, prompt: str, max_new_tokens: int = 256) -> str:
-        """Call the remote Kaggle worker endpoint (synchronous)."""
+        """Call the remote Groq worker /generate endpoint (synchronous)."""
         if not self.remote_endpoint:
             raise RuntimeError("Remote endpoint not configured for GPU mode")
 
@@ -264,7 +264,7 @@ class WorkerNode:
             with httpx.Client(timeout=300.0) as client:
                 response = client.post(
                     f"{self.remote_endpoint}/generate",
-                    json={"question": prompt, "max_new_tokens": max_new_tokens},
+                    json={"prompt": prompt, "max_new_tokens": max_new_tokens},
                     headers=self._remote_headers(),
                 )
                 response.raise_for_status()
@@ -285,7 +285,7 @@ class WorkerNode:
         Generate text for a single prompt.
         
         Device-aware routing:
-        - If device is CUDA: sends request to remote Kaggle endpoint (batched)
+        - If device is CUDA: sends request to remote Groq worker endpoint
         - If device is CPU: runs inference locally using generate_single
         
         Args:
@@ -324,8 +324,7 @@ class WorkerNode:
         Generate text for multiple prompts.
 
         Device-aware routing:
-        - CUDA: dispatch all prompts concurrently to the remote Kaggle endpoint.
-                The remote does dynamic batching on the GPU.
+        - CUDA: dispatch all prompts concurrently to the remote Groq worker endpoint.
         - CPU:  process each prompt sequentially via generate_single.
                 CPU has no batching benefit — padded batched generate is slower
                 than sequential single calls (no early stop, no parallel matmul win).

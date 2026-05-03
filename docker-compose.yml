@@ -17,10 +17,14 @@ services:
       context: .
       dockerfile: master/Dockerfile.master_node
     container_name: master1
+    ports:
+      - "7001:7000"
     environment:
       MASTER_ID: master1
+      WORKER_API_KEY: ${WORKER_API_KEY}
       WORKERS_BOOTSTRAP: '[{"worker_id":"worker_1_1","url":"http://cpu_worker_1_1:9001","device_type":"cpu"},
-                          {"worker_id":"worker_1_2","url":"http://cpu_worker_1_2:9001","device_type":"cpu"}]'
+                          {"worker_id":"worker_1_2","url":"http://cpu_worker_1_2:9001","device_type":"cpu"},
+                          {"worker_id":"groq_worker_1_3","url":"http://groq_worker_1_3:8000","device_type":"gpu"}]'
 
 
   master2:
@@ -28,10 +32,14 @@ services:
       context: .
       dockerfile: master/Dockerfile.master_node
     container_name: master2
+    ports:
+      - "7002:7000"
     environment:
       MASTER_ID: master2
+      WORKER_API_KEY: ${WORKER_API_KEY}
       WORKERS_BOOTSTRAP: '[{"worker_id":"worker_2_1","url":"http://cpu_worker_2_1:9001","device_type":"cpu"},
-                          {"worker_id":"worker_2_2","url":"http://cpu_worker_2_2:9001","device_type":"cpu"}]'
+                          {"worker_id":"worker_2_2","url":"http://cpu_worker_2_2:9001","device_type":"cpu"},
+                          {"worker_id":"groq_worker_2_3","url":"http://groq_worker_2_3:8000","device_type":"gpu"}]'
 
   cpu_worker_1_1:
     build:
@@ -48,24 +56,37 @@ services:
     volumes:
       - ./models:/app/models:ro
     restart: unless-stopped
-  
-      
 
-  cpu_worker_1_2:
-      build:
-        context: .
-        dockerfile: workers/Dockerfile.cpu
-      container_name: cpu_worker_1_2
-      environment:
-        - MODEL_PATH=/app/models/qwen2.5-0.5b
-        - WORKER_ID=worker_1_2
-        - MASTER_URL=http://master1:7000
-        - SELF_URL=http://cpu_worker_1_2:9001
-      ports:
-        - "9002:9001"
-      volumes:
-        - ./models:/app/models:ro
-      restart: unless-stopped
+  # cpu_worker_1_2:
+  #     build:
+  #       context: .
+  #       dockerfile: workers/Dockerfile.cpu
+  #     container_name: cpu_worker_1_2
+  #     environment:
+  #       - MODEL_PATH=/app/models/qwen2.5-0.5b
+  #       - WORKER_ID=worker_1_2
+  #       - MASTER_URL=http://master1:7000
+  #       - SELF_URL=http://cpu_worker_1_2:9001
+  #     ports:
+  #       - "9002:9001"
+  #     volumes:
+  #       - ./models:/app/models:ro
+  #     restart: unless-stopped
+
+  groq_worker_1_3:
+    build:
+      context: .
+      dockerfile: workers/Dockerfile.groq
+    container_name: groq_worker_1_3
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - WORKER_ID=groq_worker_1_3
+      - MASTER_URL=http://master1:7000
+      - SELF_URL=http://groq_worker_1_3:8000
+    ports:
+      - "8000:8000"
+    restart: unless-stopped 
+
   cpu_worker_2_1:
       build:
         context: .
@@ -81,19 +102,33 @@ services:
       volumes:
         - ./models:/app/models:ro
       restart: unless-stopped
-  cpu_worker_2_2:
-      build:
-        context: .
-        dockerfile: workers/Dockerfile.cpu
-      container_name: cpu_worker_2_2
-      environment:
-        - MODEL_PATH=/app/models/qwen2.5-0.5b
-        - WORKER_ID=worker_2_2
-        - MASTER_URL=http://master2:7000
-        - SELF_URL=http://cpu_worker_2_2:9001
-      ports:
-        - "9004:9001"
-      volumes:
-        - ./models:/app/models:ro
-      restart: unless-stopped
+  # cpu_worker_2_2:
+  #     build:
+  #       context: .
+  #       dockerfile: workers/Dockerfile.cpu
+  #     container_name: cpu_worker_2_2
+  #     environment:
+  #       - MODEL_PATH=/app/models/qwen2.5-0.5b
+  #       - WORKER_ID=worker_2_2
+  #       - MASTER_URL=http://master2:7000
+  #       - SELF_URL=http://cpu_worker_2_2:9001
+  #     ports:
+  #       - "9004:9001"
+  #     volumes:
+  #       - ./models:/app/models:ro
+  #     restart: unless-stopped
+
+  groq_worker_2_3:
+    build:
+      context: .
+      dockerfile: workers/Dockerfile.groq
+    container_name: groq_worker_2_3
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - WORKER_ID=groq_worker_2_3
+      - MASTER_URL=http://master2:7000
+      - SELF_URL=http://groq_worker_2_3:8000
+    ports:
+      - "8001:8000"
+    restart: unless-stopped      
 

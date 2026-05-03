@@ -97,7 +97,6 @@ class Forwarder:
         max_new_tokens: int,
     ) -> dict:
         request_score = estimate_request_score(prompt, max_new_tokens)
-        payload = {"question": prompt, "max_new_tokens": max_new_tokens}
         headers = {"X-API-Key": self._api_key} if self._api_key else {}
 
         tried: list[str] = []
@@ -125,6 +124,13 @@ class Forwarder:
 
             tried.append(worker.worker_id)
             exclude.add(worker.worker_id)
+
+            # GPU workers run groq_worker.py which expects {"prompt": ...};
+            # CPU workers run worker_router.py which expects {"question": ...}.
+            if worker.device_type == "gpu":
+                payload = {"prompt": prompt, "max_new_tokens": max_new_tokens}
+            else:
+                payload = {"question": prompt, "max_new_tokens": max_new_tokens}
 
             try:
                 resp = await self._client.post(
