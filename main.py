@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from master.routers.mock_api import router as mock_router
+from master.routers.master_router import router as mock_router
 
 
 # MODEL_NAME = "Qwen/Qwen2.5-0.5B"

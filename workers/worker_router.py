@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from workers.worker_service import WorkerNode
+from workers.inference import generate_response
 
 MODEL_PATH = os.getenv(
     "MODEL_PATH",
@@ -20,6 +21,12 @@ async def lifespan(app: FastAPI):
         model_path=MODEL_PATH,
         device="cpu"  # CPU only for this container
     )
+    master_url = os.getenv("MASTER_URL")
+    if master_url:
+        _worker.start_heartbeat(master_url, interval_sec=5.0)
+    yield
+    if master_url:
+        _worker.stop_heartbeat()
     print(f"[worker_router] Worker initialized with model: {MODEL_PATH}")
     yield
     print("[worker_router] Worker shutdown")

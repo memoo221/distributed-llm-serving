@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from master.routers.mock_api import router
+from master.routers.master_router import router
 from master.services.config import load_bootstrap_workers
 from master.services.forwarder import Forwarder
 from master.services.registry import WorkerRegistry

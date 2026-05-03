@@ -2,56 +2,62 @@
 
 ## Overview
 
-This project implements a distributed system for handling concurrent LLM inference requests with load balancing, GPU task distribution, and fault tolerance.
+This project implements a distributed system for handling concurrent LLM inference requests with load balancing, scheduler-driven worker selection, heartbeat-based health monitoring, and fault tolerance.
 
 Current request flow:
 
 ```
-Client → NGINX:8008 → Master Nodes:7000 → Worker Nodes (local CPU + remote Kaggle GPU)
+Client → NGINX:8008 → Master Nodes:7000 → Worker Nodes (local CPU + Groq cloud)
 ```
+
+Workers are heterogeneous:
+
+- **CPU workers** load Qwen 2.5 0.5B locally and serve from a single in-process slot.
+- **Groq workers** are thin FastAPI shims that forward to the Groq cloud API (`llama-3.1-8b-instant`). They count as `device_type: "gpu"` for scheduling.
+
+The master's scheduler does threshold-based routing: requests with an estimated token score ≥ 256 go GPU-only; smaller requests prefer CPU via JSQ(2), with a fallback to GPU when the CPU pool saturates ([master/services/scheduler.py](master/services/scheduler.py)).
 
 ---
 
-## NGINX Load Balancer + Mock Masters (Docker)
+## Stack
 
-This local Docker stack validates NGINX load balancing across 4 mock master nodes before the real master-node logic is implemented.
+The local Docker Compose stack runs the full end-to-end pipeline.
 
 ### What's included
 
-- NGINX as the public entry point on port `8008`
-- 4 simulated master nodes: `master1`, `master2`, `master3`, `master4`
-- Each mock master runs a lightweight FastAPI service on port `7000`
-- A traffic simulation script to verify request distribution across masters
-- Mock master routes refactored into `master/routers/mock_api.py`
+- NGINX as the public entry point on port `8008` (least-conn LB across masters)
+- 2 master nodes: `master1`, `master2` (FastAPI on internal port `7000`; mapped to host `7001`/`7002`)
+- 2 CPU workers: `cpu_worker_1_1`, `cpu_worker_2_1` (one per master, port `9001` internal)
+- 2 Groq workers: `groq_worker_1_3`, `groq_worker_2_3` (one per master, port `8000` internal)
 
 ### Files
 
 - `docker-compose.yml`
 - `nginx/nginx.conf`
-- `master/Dockerfile.mock`
-- `master/mock_api.py`
-- `master/routers/mock_api.py`
-- `tests/simulate_nginx_lb.py`
-- `.dockerignore`
+- `master/Dockerfile.master_node`, `master/master_app.py`, `master/services/*` (registry, forwarder, scheduler), `master/routers/master_router.py`
+- `workers/Dockerfile.cpu`, `workers/worker_router.py`, `workers/worker_service.py` — local CPU pipeline
+- `workers/Dockerfile.groq`, `workers/groq_worker.py` — Groq cloud shim
+- `tests/simulate_nginx_lb.py` — nginx-level master LB test
+- `tests/simulate_worker_scheduling.py` — end-to-end scheduler test
+- `tests/smoke_worker_node.py` — direct smoke test of `WorkerNode` (CPU + remote)
+
+### Required environment variables
+
+Copy `.env.example` to `.env` and fill values:
+
+```
+GROQ_API_KEY=          # required for groq workers — see https://console.groq.com/keys
+WORKER_API_KEY=        # optional — header used on master ↔ worker calls
+```
 
 ### How to run
 
-1. Start Docker Desktop.
-2. From the project root:
-
 ```powershell
 docker compose up --build -d
-```
-
-3. Confirm all containers are up:
-
-```powershell
 docker compose ps -a
 ```
 
-Expected:
-- `distributed-nginx` is `Up`
-- `master1`, `master2`, `master3`, `master4` are all `Up`
+Expected `Up`: `distributed-nginx`, `master1`, `master2`, `cpu_worker_1_1`, `cpu_worker_2_1`, `groq_worker_1_3`, `groq_worker_2_3`.
 
 ### How to verify
 
@@ -61,310 +67,192 @@ Expected:
 curl http://localhost:8008/nginx/health
 ```
 
-Expected response:
-
-```text
-nginx ok
-```
-
-**2. Requests are forwarded to a master:**
+**2. Each master sees its 2 workers:**
 
 ```powershell
-curl http://localhost:8008/
-curl http://localhost:8008/health
-curl -X POST http://localhost:8008/generate -H "Content-Type: application/json" -d "{\"prompt\":\"hello\",\"delay_ms\":500}"
+curl http://localhost:7001/scheduler/workers
+curl http://localhost:7002/scheduler/workers
 ```
 
-Expected:
-- HTTP `200`
-- JSON response containing `master_id`
+`last_seen_sec_ago` should be < 5 for both workers. `device_type` should be `cpu` for one and `gpu` for the other.
 
-**3. Verify load balancing:**
+**3. End-to-end via NGINX:**
 
 ```powershell
-python tests/simulate_nginx_lb.py --requests 20 --concurrency 8 --delay-ms 1000
+# small request (max_new_tokens < 256) → routes to a CPU worker
+curl -X POST http://localhost:8008/generate -H "Content-Type: application/json" -d '{\"prompt\":\"hello\",\"max_new_tokens\":32}'
+
+# large request (max_new_tokens ≥ 256) → routes to a Groq worker
+curl -X POST http://localhost:8008/generate -H "Content-Type: application/json" -d '{\"prompt\":\"hello\",\"max_new_tokens\":300}'
 ```
 
-Expected:
-- All requests return `status=200`
-- Final summary shows traffic distributed across all 4 masters
+Response includes `master_id` and `worker_id` so you can see which path served the request.
 
-```text
-master1: 5
-master2: 5
-master3: 5
-master4: 5
+### Test scripts
+
+```powershell
+# Verify nginx least_conn distributes across masters
+python tests/simulate_nginx_lb.py --base-url http://localhost:8008 --requests 30 --concurrency 8
+
+# Verify scheduler routes by token score (small→CPU, large→GPU)
+python tests/simulate_worker_scheduling.py --base-url http://localhost:8008 --requests 20 --large-ratio 1
+python tests/simulate_worker_scheduling.py --base-url http://localhost:8008 --requests 20 --large-ratio 0
+python tests/simulate_worker_scheduling.py --base-url http://localhost:8008 --requests 30 --large-ratio 0.3 --concurrency 8
 ```
+
+Expected distribution by worker:
+
+| Run | Workers you should see |
+|---|---|
+| `--large-ratio 1` | `groq_worker_1_3` + `groq_worker_2_3` |
+| `--large-ratio 0` | `worker_1_1` + `worker_2_1` |
+| `--large-ratio 0.3` | mix of all four |
 
 ### Failover check
 
-Validate that NGINX reroutes traffic when a master is unavailable:
+Stop a master and confirm nginx fails over to the survivor:
 
 ```powershell
-docker compose stop master2
-python tests/simulate_nginx_lb.py --requests 20 --concurrency 8 --delay-ms 1000
-docker compose start master2
+docker compose stop master1
+python tests/simulate_worker_scheduling.py --base-url http://localhost:8008 --requests 10 --large-ratio 1
+docker compose start master1
 ```
 
-Expected:
-- Requests still succeed while `master2` is stopped
-- `master2` disappears from the distribution summary during the stop window
+While master1 is down, every successful response should come from a `_2_*` worker. After restart, traffic returns to a mix.
 
 ### Important ports
 
-- `8008` — NGINX load balancer
-- `7000` — mock master node services
+| Service | Host port | Internal port |
+|---|---|---|
+| nginx | `8008` | 8008 |
+| master1 | `7001` | 7000 |
+| master2 | `7002` | 7000 |
+| cpu_worker_1_1 | `9001` | 9001 |
+| cpu_worker_2_1 | `9003` | 9001 |
+| groq_worker_1_3 | `8000` | 8000 |
+| groq_worker_2_3 | `8001` | 8000 |
 
 ---
 
 ## LLM Models Setup
 
-### Download models
-
-Models are stored locally and are **not pushed to GitHub** (excluded via `.gitignore`).
-
-**TinyLlama 1.1B Chat** (~2.2 GB):
-
-```powershell
-python models/download_model.py
-```
-
-Saves to: `models/tinyllama-1.1b-chat/`
-
-**Qwen 2.5 0.5B** (~1 GB):
+The CPU workers load Qwen 2.5 0.5B from `models/qwen2.5-0.5b/`. Download once before the first build:
 
 ```powershell
 python models/download_qwen.py
 ```
 
-Saves to: `models/qwen2.5-0.5b/`
+The directory is mounted read-only into each CPU worker via the `./models:/app/models:ro` volume in compose. The download script resumes automatically if interrupted.
 
-> Both scripts resume automatically if the download is interrupted.
-
----
-
-### Starting a local worker
-
-Run the generic worker (CPU or any local CUDA device):
-
-```powershell
-$env:WORKER_API_KEY="<from team vault>"
-python workers/worker.py cpu_worker_1 cpu 9001
-```
-
-Args: `worker_id`, `device` (`cpu` / `cuda:0` / `cuda:1`), `port`.
-
-**Test the endpoint:**
-
-```powershell
-curl -X POST http://localhost:9001/generate `
-  -H "Content-Type: application/json" `
-  -H "X-API-Key: $env:WORKER_API_KEY" `
-  -d '{\"question\": \"What is the capital of France?\"}'
-```
-
-Expected response shape (see Worker API Contract below):
-
-```json
-{
-  "worker_id": "cpu_worker_1",
-  "response": "The capital of France is Paris.",
-  "stats": { "latency_ms": 1432.1, "output_tokens": 8 }
-}
-```
-
-**Health check (no auth required):**
-
-```powershell
-curl http://localhost:9001/health
-```
-
-> On CPU, responses take 30–120 seconds. On a CUDA GPU, install:
-> `pip install torch --index-url https://download.pytorch.org/whl/cu121`
-> and the model will run in 1–3 seconds automatically.
+> Groq workers don't need a local model — they forward to Groq cloud.
 
 ---
 
-## GPU Worker Nodes (Kaggle)
+## GPU Worker Nodes (Groq)
 
-Two GPU worker nodes run on Kaggle Tesla T4s. Both are exposed publicly through a single ngrok tunnel that fronts an in-cluster reverse proxy on the Kaggle host. The proxy uses path-based routing to send `/w1/*` to worker_1.1 (port 8000) and `/w2/*` to worker_1.2 (port 8001).
-
-Full deployment walkthrough: [`workers/KAGGLE_SETUP.md`](workers/KAGGLE_SETUP.md).
+Each Groq worker is a thin FastAPI service that forwards `/generate` to Groq's `chat.completions` endpoint and returns the response. From the master's perspective they are `device_type: "gpu"`.
 
 ### Architecture
 
 ```
-master ──▶ https://<ngrok>.ngrok-free.app/w1/*  ──▶  Kaggle proxy:7000  ──▶  worker_1.1:8000 (T4 #0)
-       └─▶ https://<ngrok>.ngrok-free.app/w2/*  ──▶  Kaggle proxy:7000  ──▶  worker_1.2:8001 (T4 #1)
+master ──▶ http://groq_worker_X_3:8000/generate ──▶ Groq cloud (llama-3.1-8b-instant)
 ```
 
-The single-tunnel + proxy design exists because free-tier ngrok caps at one simultaneous tunnel per account. The proxy adds ~1 ms per request (negligible vs. ~600 ms inference) and demonstrates the same Layer 7 path-routing pattern as NGINX in the master tier.
+### Heartbeats
 
-### Endpoints
-
-URLs are **dynamic** — ngrok generates a new public URL on every Kaggle session restart. After starting the notebook, the proxy cell prints the current URLs. Paste them into the master's worker registry.
-
-| Worker | URL pattern | GPU | Model |
-|---|---|---|---|
-| `worker_1.1` | `<ngrok-url>/w1` | Tesla T4 (16 GB) | Qwen 2.5 0.5B Instruct |
-| `worker_1.2` | `<ngrok-url>/w2` | Tesla T4 (16 GB) | Qwen 2.5 0.5B Instruct |
-
-Example master worker registry entry:
+`groq_worker.py` runs a background `heartbeat_loop()` that posts every 5 s to `MASTER_URL/heartbeat`:
 
 ```json
 {
-  "workers": [
-    {"id": "worker_1.1", "url": "https://<ngrok-url>/w1"},
-    {"id": "worker_1.2", "url": "https://<ngrok-url>/w2"}
-  ]
+  "worker_id": "groq_worker_1_3",
+  "url": "http://groq_worker_1_3:8000",
+  "device_type": "gpu",
+  "active_requests": 0,
+  "queue_depth": 0,
+  "timestamp": 1714838400.0
 }
 ```
 
-### Required environment variables
-
-Copy `.env.example` to `.env` and fill values from the team vault:
-
-```
-WORKER_API_KEY=          # required for /generate and /stats
-MASTER_URL=              # optional, enables worker → master heartbeats
-```
-
-All `/generate` and `/stats` calls require the header:
-
-```
-X-API-Key: $WORKER_API_KEY
-```
+The master's registry treats workers stale after `WORKER_STALE_SEC` (default 15 s) of silence and skips them in `pick_worker`.
 
 ### API
 
-Each GPU worker (reachable via `<ngrok-url>/w1` or `/w2`) exposes:
-
-- `GET /health` — status + GPU stats (no auth)
-- `GET /stats` — same payload, requires `X-API-Key`
-- `POST /generate` — LLM inference, requires `X-API-Key`
-
-### Generate example
-
-```powershell
-curl -X POST https://<ngrok-url>.ngrok-free.app/w1/generate `
-  -H "Content-Type: application/json" `
-  -H "X-API-Key: $env:WORKER_API_KEY" `
-  -d '{\"question\": \"What is distributed computing?\"}'
-```
-
-### Worker capabilities
-
-- **Dynamic batching** (50 ms window, batch size 8) — measured 13× throughput vs. single-request mode (16 → 212 tokens/sec).
-- **GPU telemetry** in every response: per-request memory, output tokens, batch size, tokens/sec. `/health` adds GPU utilization %, VRAM, temperature.
-- **Heartbeats** — when `MASTER_URL` is set, workers POST status every 5s for auto-discovery and load-aware routing.
-- **Load-tested**: 256 concurrent requests with zero errors. Sweet spot ~16 concurrent per worker, ~3.5 req/sec sustained.
-
-### Session constraints
-
-- Kaggle sessions cap at ~9h wall-clock and idle out after ~20 min.
-- ngrok URLs change every session — refresh the master's worker config after each restart.
-- If a worker returns 502, the Kaggle kernel has died. Ping the worker maintainer to restart.
-
-### Per-worker limits
-
-| Metric | Value |
-|---|---|
-| Sweet spot concurrent | 16 |
-| Sustained throughput | 3.5 req/sec (32-token outputs) |
-| Hard ceiling | 256+ concurrent (no errors, high latency) |
-| Two-worker total | ~7 req/sec, ~32 concurrent |
-
----
-
-## Worker API Contract
-
-All worker nodes (local CPU, Kaggle GPU, mock) **MUST** expose the same API so the master can route to any of them interchangeably.
-
-### `GET /health`
-
-Returns worker status. No authentication.
-
-```json
-{
-  "status": "ok",
-  "worker_id": "worker_1.1",
-  "active_requests": 0,
-  "uptime_sec": 123.4
-}
-```
-
-Optional fields when available: `gpu_util_pct`, `vram_used_mb`, `vram_total_mb`, `queue_depth`, `total_requests`, `total_errors`, `batching`, `batch_size`.
-
-### `GET /stats`
-
-Same shape as `/health`. Requires `X-API-Key` header.
-
-### `POST /generate`
-
-Runs inference. Requires `X-API-Key` header on remote workers.
+- `GET /health` — liveness, returns `worker_id` and `active_requests`
+- `POST /generate` — runs inference
 
 **Request:**
 
 ```json
-{
-  "question": "What is distributed computing?",
-  "max_new_tokens": 256
-}
+{ "prompt": "What is distributed computing?", "max_new_tokens": 256 }
 ```
 
 **Response:**
 
 ```json
-{
-  "worker_id": "worker_1.1",
-  "response": "Distributed computing refers to...",
-  "stats": {
-    "latency_ms": 528.6,
-    "output_tokens": 70
-  }
-}
+{ "response": "Distributed computing refers to..." }
 ```
 
-`stats` may include additional fields when available: `batch_size`, `peak_mem_mb`, `per_request_mem_mb`, `tokens_per_sec`, `batch_tokens_per_sec`.
+### Env vars (set in compose)
 
-> The legacy `workers/worker_router.py` returns `{question, answer}` — this needs to be aligned to the contract above before the master can route to both local and Kaggle workers from the same code path. Tracked separately.
+| Variable | Purpose |
+|---|---|
+| `GROQ_API_KEY` | Authenticates against Groq cloud |
+| `WORKER_ID` | Heartbeat identity |
+| `SELF_URL` | URL the master will call back on |
+| `MASTER_URL` | Heartbeat target |
+| `WORKER_API_KEY` | Optional — sent as `X-API-Key` header on heartbeats |
 
 ---
 
-## Optional local backend run
+## Worker API Contract
 
-To run the separate backend app manually outside the Docker mock stack:
+The two worker types speak slightly different request shapes; the master's `Forwarder` ([master/services/forwarder.py](master/services/forwarder.py)) builds the right payload per `device_type`.
 
-```powershell
-uvicorn main:app --host 0.0.0.0 --port 8080 --reload
+### CPU worker (`worker_router.py`)
+
+```
+POST /generate
+Request:  {"question": "...", "max_new_tokens": 256}
+Response: {"question": "...", "answer": "..."}
 ```
 
-This is separate from the NGINX simulation and should not be run on port `8008`.
+### Groq worker (`groq_worker.py`)
+
+```
+POST /generate
+Request:  {"prompt": "...", "max_new_tokens": 256}
+Response: {"response": "..."}
+```
+
+### Master `/generate` (client-facing)
+
+```
+POST /generate
+Request:  {"prompt": "...", "max_new_tokens": 256}
+Response: {"response": "...", "worker_id": "...", "master_id": "...", ...}
+```
+
+The master accepts the unified `prompt` field on input. On output it normalizes by reading `answer` (CPU) or `response` (Groq) into a single `response` field.
 
 ---
 
 ## Notes
 
-- `nginx/nginx.conf` is mounted into the container, so config edits do not require rebuilding the image.
-- Python code inside the mock master image does require rebuilds:
-
-```powershell
-docker compose up --build -d
-```
-
-- `.env` must never be committed. `.env.example` documents the required variables.
-- The Kaggle notebook itself is not committed (it depends on per-account Kaggle Secrets and ngrok tokens). Setup steps are reproducible from `workers/KAGGLE_SETUP.md`.
+- `nginx/nginx.conf` is mounted into the container — config changes don't require an image rebuild.
+- Master and worker images do require rebuilds: `docker compose up --build`.
+- `.env` must never be committed. `.env.example` documents required variables.
+- The Kaggle integration documented in `workers/KAGGLE_SETUP.md` is **retired**. GPU traffic now goes through Groq cloud instead of Tesla T4s on Kaggle.
 
 ---
 
 ## Current Scope
 
-- ✅ NGINX load balancer with 4 mock masters (Docker)
-- ✅ Worker server skeleton (`workers/worker_router.py`)
-- ✅ Generic worker (`workers/worker.py`) with batching, GPU telemetry, heartbeats
-- ✅ Two real GPU workers on Kaggle (Tesla T4) via ngrok proxy
-- ✅ Load-test data: 256 concurrent, zero errors, knee at N=16
-- ⏳ Real master-node scheduling and worker registry
-- ⏳ Heartbeat-based health monitoring on the master
-- ⏳ Load-aware routing across heterogeneous workers (GPU + CPU)
-- ⏳ End-to-end fault tolerance demo
+- ✅ NGINX least-conn load balancing across 2 master nodes (with `proxy_next_upstream` failover)
+- ✅ Master scheduler with threshold-based GPU/CPU routing + JSQ(2) on CPU
+- ✅ Worker registry with heartbeat-based liveness + failure cooldowns
+- ✅ Forwarder with cross-worker retries on 5xx / timeout
+- ✅ CPU workers (Qwen 2.5 0.5B, local) + Groq workers (cloud LLM)
+- ✅ End-to-end test scripts (`simulate_nginx_lb.py`, `simulate_worker_scheduling.py`, `smoke_worker_node.py`)
+- ⏳ Real-time in-flight tracking at the master (so CPU saturation fallback fires under sub-heartbeat bursts)
+- ⏳ RAG integration
+- ⏳ Multi-failure fault-tolerance demo

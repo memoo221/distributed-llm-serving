@@ -3,20 +3,21 @@ Smoke test for WorkerNode.
 
 Exercises the two device paths end-to-end:
 - cpu:  loads a local HF model, runs generate() and generate_batch()
-- cuda: routes through a remote tunnel (Kaggle ngrok URL or another worker)
+- cuda: routes through a remote Groq worker (workers/groq_worker.py /generate)
 
 Run from project root:
 
     # cpu only (uses local model)
     python tests/smoke_worker_node.py --mode cpu --model models/qwen2.5-0.5b
 
-    # cuda only (requires WORKER_API_KEY env var set)
-    python tests/smoke_worker_node.py --mode cuda --remote-endpoint https://<ngrok>.app
+    # cuda only (points at running groq workers — see docker-compose.yml)
+    python tests/smoke_worker_node.py --mode cuda \
+        --remote-endpoints http://localhost:8000,http://localhost:8001
 
     # both
     python tests/smoke_worker_node.py --mode both \
         --model models/qwen2.5-0.5b \
-        --remote-endpoint https://<ngrok>.app
+        --remote-endpoints http://localhost:8000,http://localhost:8001
 """
 
 from __future__ import annotations
@@ -132,8 +133,8 @@ def main() -> int:
         "--remote-endpoints",
         default=os.getenv("REMOTE_ENDPOINTS"),
         help=(
-            "Comma-separated tunnel URLs for cuda mode "
-            "(e.g. 'https://x.app/w1,https://x.app/w2'). "
+            "Comma-separated Groq worker URLs for cuda mode "
+            "(e.g. 'http://localhost:8000,http://localhost:8001' — see docker-compose.yml). "
             "Or set REMOTE_ENDPOINTS env var. "
             "One WorkerNode is created per URL."
         ),
@@ -170,7 +171,7 @@ def main() -> int:
                     cpu_node, f"CPU node {i+1}/{args.cpu_count}", args.max_new_tokens
                 )
 
-    # ----- CUDA nodes -----
+    # ----- CUDA nodes (Groq worker) -----
     if args.mode in ("cuda", "both"):
         endpoints = _parse_endpoints(args.remote_endpoints)
         if not endpoints:
@@ -180,10 +181,6 @@ def main() -> int:
                 False,
                 "missing --remote-endpoints (or REMOTE_ENDPOINTS env var)",
             )
-            overall_ok = False
-        elif not os.getenv("WORKER_API_KEY"):
-            _section("CUDA mode")
-            _result("WORKER_API_KEY", False, "env var not set")
             overall_ok = False
         else:
             for i, ep in enumerate(endpoints):
