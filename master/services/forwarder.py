@@ -28,7 +28,7 @@ class AllRetriesFailed(Exception):
 
 
 # HTTP status codes that warrant a retry on a different worker
-_RETRY_STATUSES = {502, 503, 504}
+_RETRY_STATUSES = {429, 502, 503, 504}
 
 
 class Forwarder:

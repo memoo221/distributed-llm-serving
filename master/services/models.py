@@ -19,7 +19,8 @@ class WorkerState:
 
     @property
     def slots(self) -> int:
-        return 16 if self.device_type == "gpu" else 1
+        from master.services.config import GPU_SLOTS
+        return GPU_SLOTS if self.device_type == "gpu" else 1
 
     @property
     def effective_load(self) -> float:

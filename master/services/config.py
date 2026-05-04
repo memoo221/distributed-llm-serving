@@ -11,6 +11,15 @@ FAILURE_COOLDOWN_SEC: float = float(os.getenv("WORKER_FAILURE_COOLDOWN_SEC", "5"
 # request_score threshold above which the request goes GPU-only
 GPU_ROUTE_THRESHOLD: int = int(os.getenv("GPU_ROUTE_THRESHOLD", "256"))
 
+# Fraction of GPU effective_load above which small requests overflow to CPU.
+# 0.85 × GPU_SLOTS = spill threshold. Lower = earlier CPU spillover.
+GPU_BUSY_THRESHOLD: float = float(os.getenv("GPU_BUSY_THRESHOLD", "0.85"))
+
+# Concurrency capacity of a single GPU worker.
+# Groq free tier: 30 RPM ≈ 0.5 req/s; at ~2s avg latency → ~1 slot.
+# Set higher (e.g. 8) if using a paid Groq tier or a real local GPU.
+GPU_SLOTS: int = int(os.getenv("GPU_SLOTS", "1"))
+
 # API key the master injects on outbound /generate calls to workers
 WORKER_API_KEY: str = os.getenv("WORKER_API_KEY", "")
 

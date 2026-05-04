@@ -79,7 +79,7 @@ services:
       dockerfile: workers/Dockerfile.groq
     container_name: groq_worker_1_3
     environment:
-      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY_1}
       - WORKER_ID=groq_worker_1_3
       - MASTER_URL=http://master1:7000
       - SELF_URL=http://groq_worker_1_3:8000
@@ -124,7 +124,7 @@ services:
       dockerfile: workers/Dockerfile.groq
     container_name: groq_worker_2_3
     environment:
-      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY_2}
       - WORKER_ID=groq_worker_2_3
       - MASTER_URL=http://master2:7000
       - SELF_URL=http://groq_worker_2_3:8000

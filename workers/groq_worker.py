@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from groq import Groq
 from pydantic import BaseModel
 
@@ -91,6 +91,8 @@ async def generate(req: Request):
         )
         return {"response": response.choices[0].message.content}
     except Exception as e:
-        return {"error": str(e)}
+        if "rate_limit" in type(e).__name__.lower() or "429" in str(e):
+            raise HTTPException(status_code=429, detail="groq rate limit exceeded")
+        raise HTTPException(status_code=502, detail=str(e))
     finally:
         active_requests -= 1
