@@ -100,20 +100,20 @@ services:
     restart: unless-stopped 
 
   cpu_worker_2_1:
-      build:
-        context: .
-        dockerfile: workers/Dockerfile.cpu
-      container_name: cpu_worker_2_1
-      environment:
-        - MODEL_PATH=/app/models/qwen2.5-0.5b
-        - WORKER_ID=worker_2_1
-        - MASTER_URL=http://master2:7000
-        - SELF_URL=http://cpu_worker_2_1:9001
-      ports:
-        - "9002:9001"
-      volumes:
-        - ./models:/app/models:ro
-      restart: unless-stopped
+    build:
+      context: .
+      dockerfile: workers/Dockerfile.cpu
+    container_name: cpu_worker_2_1
+    environment:
+      - MODEL_PATH=/app/models/qwen2.5-0.5b
+      - WORKER_ID=worker_2_1
+      - MASTER_URL=http://master2:7000
+      - SELF_URL=http://cpu_worker_2_1:9001
+    ports:
+      - "9002:9001"
+    volumes:
+      - ./models:/app/models:ro
+    restart: unless-stopped
   
   groq_worker_2_2:
     build:
