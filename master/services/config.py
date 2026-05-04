@@ -34,7 +34,7 @@ RETRY_DELAYS: list[float] = [0.1, 0.3]
 
 # How long a request will wait for a suitable worker to free up before 503-ing.
 # Workers heartbeat every 5 s, so 30 s = ~6 heartbeat cycles.
-QUEUE_WAIT_TIMEOUT: float = float(os.getenv("QUEUE_WAIT_TIMEOUT", "30.0"))
+QUEUE_WAIT_TIMEOUT: float = float(os.getenv("QUEUE_WAIT_TIMEOUT", "120.0"))
 
 # Static worker list bootstrapped from env so workers are reachable before
 # their first heartbeat arrives. JSON list: [{worker_id, url, device_type}]
