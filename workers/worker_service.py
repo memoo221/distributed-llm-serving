@@ -1,6 +1,5 @@
 import asyncio
 import os
-from pyexpat.errors import messages
 import threading
 import time
 import uuid
@@ -85,6 +84,12 @@ class WorkerNode:
         self.total_requests = 0
         self.total_errors = 0
         self.started_at = time.time()
+
+        # In-flight request counter — reported on heartbeat so the master
+        # scheduler sees real load. Synchronized because /generate runs in
+        # FastAPI's threadpool (sync route) and the heartbeat thread reads it.
+        self.active_requests = 0
+        self._active_lock = threading.Lock()
     
     def _select_device(self, device: Optional[str]) -> str:
         """
@@ -108,6 +113,14 @@ class WorkerNode:
         
         return "cpu"
     
+    def _inc_active(self, n: int = 1) -> None:
+        with self._active_lock:
+            self.active_requests += n
+
+    def _dec_active(self, n: int = 1) -> None:
+        with self._active_lock:
+            self.active_requests -= n
+
     def _get_device_idx(self) -> Optional[int]:
         """Extract CUDA device index if applicable."""
         if "cuda" in self.device:
@@ -298,19 +311,23 @@ class WorkerNode:
         Returns:
             Generated text
         """
-        if "cuda" in self.device:
-            # GPU mode: route to remote endpoint
-            print(f"[WorkerNode] GPU mode - routing to remote endpoint: {self.remote_endpoint}")
-            self.total_requests += 1
-            try:
-                return self._call_remote_endpoint_sync(prompt, max_new_tokens)
-            except Exception as e:
-                self.total_errors += 1
-                raise
-        else:
-            # CPU mode: local inference
-            full_prompt = self._build_prompt(prompt)
-            return self.generate_single(full_prompt, max_new_tokens, temperature, top_p, **kwargs)
+        self._inc_active()
+        try:
+            if "cuda" in self.device:
+                # GPU mode: route to remote endpoint
+                print(f"[WorkerNode] GPU mode - routing to remote endpoint: {self.remote_endpoint}")
+                self.total_requests += 1
+                try:
+                    return self._call_remote_endpoint_sync(prompt, max_new_tokens)
+                except Exception:
+                    self.total_errors += 1
+                    raise
+            else:
+                # CPU mode: local inference
+                full_prompt = self._build_prompt(prompt)
+                return self.generate_single(full_prompt, max_new_tokens, temperature, top_p, **kwargs)
+        finally:
+            self._dec_active()
     
     def generate_concurrent(
         self,
@@ -329,21 +346,26 @@ class WorkerNode:
                 CPU has no batching benefit — padded batched generate is slower
                 than sequential single calls (no early stop, no parallel matmul win).
         """
-        if "cuda" in self.device:
-            print(f"[WorkerNode] GPU mode - dispatching {len(prompts)} concurrent requests to remote endpoint")
-            self.total_requests += len(prompts)
-            try:
-                return asyncio.run(self._gather_remote(prompts, max_new_tokens))
-            except Exception:
-                self.total_errors += len(prompts)
-                raise
+        n = len(prompts)
+        self._inc_active(n)
+        try:
+            if "cuda" in self.device:
+                print(f"[WorkerNode] GPU mode - dispatching {n} concurrent requests to remote endpoint")
+                self.total_requests += n
+                try:
+                    return asyncio.run(self._gather_remote(prompts, max_new_tokens))
+                except Exception:
+                    self.total_errors += n
+                    raise
 
-        # CPU mode: sequential single-prompt inference. No batching.
-        print(f"[WorkerNode] CPU mode - processing {len(prompts)} prompts sequentially")
-        return [
-            self.generate_single(p, max_new_tokens, temperature, top_p, **kwargs)
-            for p in prompts
-        ]
+            # CPU mode: sequential single-prompt inference. No batching.
+            print(f"[WorkerNode] CPU mode - processing {n} prompts sequentially")
+            return [
+                self.generate_single(p, max_new_tokens, temperature, top_p, **kwargs)
+                for p in prompts
+            ]
+        finally:
+            self._dec_active(n)
     
     # def get_gpu_stats(self) -> Optional[Dict[str, Any]]:
     #     """Get GPU memory and utilization stats (if GPU and NVML available)."""
@@ -372,11 +394,17 @@ class WorkerNode:
         return "cuda" if "cuda" in self.device else "cpu"
 
     def _build_heartbeat_payload(self) -> Dict[str, Any]:
-        """Payload sent to the master on each heartbeat."""
+        """Payload sent to the master on each heartbeat. Must include
+        active_requests so the master scheduler can balance load — without
+        it the registry defaults the value to 0 and the worker always looks idle."""
         payload = self.get_stats()
+        with self._active_lock:
+            active = self.active_requests
         payload.update({
             "worker_id": self.worker_id,
             "device_type": self.device_type(),
+            "active_requests": active,
+            "queue_depth": 0,
             "remote_endpoint": self.remote_endpoint,
             "timestamp": time.time(),
         })
