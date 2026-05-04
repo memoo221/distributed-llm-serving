@@ -18,7 +18,7 @@ GPU_BUSY_THRESHOLD: float = float(os.getenv("GPU_BUSY_THRESHOLD", "0.85"))
 # Concurrency capacity of a single GPU worker.
 # Groq free tier: 30 RPM ≈ 0.5 req/s; at ~2s avg latency → ~1 slot.
 # Set higher (e.g. 8) if using a paid Groq tier or a real local GPU.
-GPU_SLOTS: int = int(os.getenv("GPU_SLOTS", "1"))
+GPU_SLOTS: int = int(os.getenv("GPU_SLOTS", "3"))
 
 # API key the master injects on outbound /generate calls to workers
 WORKER_API_KEY: str = os.getenv("WORKER_API_KEY", "")
