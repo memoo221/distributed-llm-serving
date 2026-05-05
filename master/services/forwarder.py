@@ -102,22 +102,40 @@ class Forwarder:
         tried: list[str] = []
         exclude: set[str] = set()
 
-        # Up to 3 attempts (initial + 2 retries), each on a different worker
+        # Each attempt lands on a different worker. max_attempts = 1 + len(RETRY_DELAYS).
         max_attempts = 1 + len(RETRY_DELAYS)
         for attempt in range(max_attempts):
-            workers = registry.snapshot()
-            worker = pick_worker(workers, request_score, exclude=exclude)
+            worker = pick_worker(registry.snapshot(), request_score, exclude=exclude)
 
             if worker is None:
-                if tried:
-                    # Already dispatched at least once — don't queue-wait again,
-                    # just fail fast so the retry budget isn't silently eaten.
-                    raise AllRetriesFailed(tried)
-                # First pick failed: sleep until a heartbeat frees a worker.
-                await self._wait_for_worker(registry, request_score, exclude)
-                workers = registry.snapshot()
-                worker = pick_worker(workers, request_score, exclude=exclude)
+                # Distinguish exhaustion from saturation:
+                #   - exhausted: every known worker is in `exclude` (we've tried them all)
+                #   - saturated: untried workers exist but are at slot capacity or in
+                #                cooldown — wait for one to free up, same as we do on
+                #                the first attempt. Without this, a high-concurrency
+                #                burst that briefly maxes every worker turns into 502s
+                #                even though capacity is about to become available.
+                untried_exists = any(
+                    w.worker_id not in exclude for w in registry.all()
+                )
+                if not untried_exists:
+                    if tried:
+                        raise AllRetriesFailed(tried)
+                    raise NoWorkerAvailable(
+                        f"no workers registered (score={request_score})"
+                    )
+
+                try:
+                    await self._wait_for_worker(registry, request_score, exclude)
+                except NoWorkerAvailable:
+                    if tried:
+                        raise AllRetriesFailed(tried)
+                    raise
+
+                worker = pick_worker(registry.snapshot(), request_score, exclude=exclude)
                 if worker is None:
+                    if tried:
+                        raise AllRetriesFailed(tried)
                     raise NoWorkerAvailable(
                         f"no eligible worker after wait (score={request_score})"
                     )
