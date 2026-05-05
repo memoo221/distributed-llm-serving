@@ -157,6 +157,7 @@ class Forwarder:
                     headers=headers,
                 )
                 if resp.status_code == 200:
+                    registry.mark_success(worker.worker_id)
                     data = resp.json()
                     data["worker_id"] = worker.worker_id
                     return data

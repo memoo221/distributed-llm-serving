@@ -11,6 +11,7 @@ class WorkerState:
     gpu_util_pct: float | None
     last_seen_monotonic: float
     failure_cooldown_until: float = 0.0  # monotonic; 0 = not in cooldown
+    consecutive_failures: int = 0        # drives exponential cooldown; reset on success
     raw: dict = field(default_factory=dict)
 
     @property

@@ -1,7 +1,11 @@
 import asyncio
 import time
 
-from master.services.config import STALE_AFTER_SEC, FAILURE_COOLDOWN_SEC
+from master.services.config import (
+    STALE_AFTER_SEC,
+    FAILURE_COOLDOWN_SEC,
+    MAX_FAILURE_COOLDOWN_SEC,
+)
 from master.services.models import WorkerState
 
 
@@ -54,9 +58,13 @@ class WorkerRegistry:
                 queue_depth=int(payload.get("queue_depth", 0)),
                 gpu_util_pct=payload.get("gpu_util_pct"),
                 last_seen_monotonic=time.monotonic(),
-                # Preserve any active cooldown from before this heartbeat
+                # Preserve any active cooldown and the failure streak across
+                # heartbeats — only mark_success resets the streak.
                 failure_cooldown_until=(
                     existing.failure_cooldown_until if existing else 0.0
+                ),
+                consecutive_failures=(
+                    existing.consecutive_failures if existing else 0
                 ),
                 raw=payload,
             )
@@ -78,11 +86,27 @@ class WorkerRegistry:
         """All workers regardless of liveness — for admin/debug endpoints."""
         return list(self._workers.values())
 
-    def mark_failed(
-        self,
-        worker_id: str,
-        cooldown_sec: float = FAILURE_COOLDOWN_SEC,
-    ) -> None:
+    def mark_failed(self, worker_id: str) -> None:
+        """Apply exponential cooldown: 5s → 10s → 20s → 40s → 60s cap.
+
+        Without this, a rate-limited worker is repeatedly thrown back into
+        rotation after 5s only to be hit by the next concurrent request and
+        marked failed again — it never gets a quiet window to recover. The
+        backoff lets sibling workers absorb load while the hot worker cools.
+        """
+        worker = self._workers.get(worker_id)
+        if not worker:
+            return
+        worker.consecutive_failures += 1
+        cooldown = min(
+            FAILURE_COOLDOWN_SEC * (2 ** (worker.consecutive_failures - 1)),
+            MAX_FAILURE_COOLDOWN_SEC,
+        )
+        worker.failure_cooldown_until = time.monotonic() + cooldown
+
+    def mark_success(self, worker_id: str) -> None:
+        """Reset the failure streak after a successful request through this
+        worker. Heartbeats alone don't reset it — only proven request success."""
         worker = self._workers.get(worker_id)
         if worker:
-            worker.failure_cooldown_until = time.monotonic() + cooldown_sec
+            worker.consecutive_failures = 0
