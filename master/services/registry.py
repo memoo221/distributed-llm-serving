@@ -17,6 +17,11 @@ class WorkerRegistry:
         # Notified on every heartbeat so waiting requests can re-check availability.
         self.worker_available = asyncio.Condition()
 
+        # Trust bootstrap workers as live at startup. If a worker isn't actually
+        # up, the first request will time out, mark_failed will put it on
+        # cooldown, and traffic shifts to siblings. This avoids a multi-second
+        # 503/queue-wait stall on every fresh master before the first heartbeat.
+        bootstrap_now = time.monotonic()
         for entry in static_workers or []:
             wid = entry["worker_id"]
             self._workers[wid] = WorkerState(
@@ -26,9 +31,7 @@ class WorkerRegistry:
                 active_requests=0,
                 queue_depth=0,
                 gpu_util_pct=None,
-                # Use a very old monotonic so they're stale until a heartbeat arrives,
-                # unless there's a WORKERS_BOOTSTRAP cold-start probe (future work).
-                last_seen_monotonic=0.0,
+                last_seen_monotonic=bootstrap_now,
                 raw=entry,
             )
 

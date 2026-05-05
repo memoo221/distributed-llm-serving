@@ -25,12 +25,17 @@ WORKER_API_KEY: str = os.getenv("WORKER_API_KEY", "")
 
 # Forwarder timeouts (seconds)
 CONNECT_TIMEOUT: float = float(os.getenv("WORKER_CONNECT_TIMEOUT", "2.0"))
-READ_TIMEOUT: float = float(os.getenv("WORKER_READ_TIMEOUT", "60.0"))
+# 180s covers Qwen 2.5-0.5B on a slow CPU generating 256 tokens (~30-90s typical,
+# longer on weak hardware). Groq workers respond in <5s so they're unaffected.
+READ_TIMEOUT: float = float(os.getenv("WORKER_READ_TIMEOUT", "180.0"))
 WRITE_TIMEOUT: float = float(os.getenv("WORKER_WRITE_TIMEOUT", "5.0"))
 POOL_TIMEOUT: float = float(os.getenv("WORKER_POOL_TIMEOUT", "2.0"))
 
-# Retry delays (seconds), jitter applied on top
-RETRY_DELAYS: list[float] = [0.1, 0.3]
+# Retry delays (seconds), jitter applied on top.
+# Length determines retry count: max_attempts = 1 + len(RETRY_DELAYS).
+# Sized so that if every GPU worker per master fails fast (502/429), we still
+# reach the CPU fallback before exhausting the budget.
+RETRY_DELAYS: list[float] = [0.1, 0.3, 0.6]
 
 # How long a request will wait for a suitable worker to free up before 503-ing.
 # Workers heartbeat every 5 s, so 30 s = ~6 heartbeat cycles.
