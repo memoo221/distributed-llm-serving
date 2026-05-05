@@ -1,20 +1,20 @@
 """
 Simulate concurrent /generate traffic against a single master and tally which
 workers handled each request. Useful for sanity-checking the scheduler's
-threshold routing (small → CPU, large → GPU) and CPU-saturation fallback.
+threshold routing (small -> CPU, large -> GPU) and CPU-saturation fallback.
 
 Run from project root:
 
     # 20 requests, 8 in flight, 30% large (GPU-bound)
     python tests/simulate_worker_scheduling.py --base-url http://localhost:7001
 
-    # All small — exercises CPU pool + saturation fallback to GPU
+    # All small -> exercises CPU pool + saturation fallback to GPU
     python tests/simulate_worker_scheduling.py --large-ratio 0
 
-    # All large — should pin to groq workers
+    # All large -> should pin to modal workers
     python tests/simulate_worker_scheduling.py --large-ratio 1
 
-    # Paced load (1 req/s) to stay within Groq free-tier RPM ceiling
+    # Paced load (1 req/s) for a gentler warm-up / sanity run
     python tests/simulate_worker_scheduling.py --requests 20 --concurrency 1 --delay 1.0
 
     # Save results to CSV
@@ -28,17 +28,17 @@ import asyncio
 import csv
 import random
 import time
-from statistics import mean, median
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+from statistics import mean, median
 from typing import Any
 
 import httpx
 
 
-SMALL_TOKENS = 32   # score ~= 35 (3 prompt tokens + 32), below GPU_ROUTE_THRESHOLD=256 → CPU first
-LARGE_TOKENS = 300  # score ~= 303, >= 256 → GPU only
+SMALL_TOKENS = 32
+LARGE_TOKENS = 300
 
 
 def _stringify_error(error: Any) -> str:
@@ -65,7 +65,7 @@ def _percentile(values: list[float], percentile_value: float) -> float:
 
 
 def _is_gpu_worker(worker_id: str | None) -> bool:
-    return bool(worker_id and "groq" in worker_id)
+    return bool(worker_id and ("modal" in worker_id or "groq" in worker_id))
 
 
 async def fire_one(
@@ -142,7 +142,6 @@ async def run(
     async with httpx.AsyncClient(timeout=240.0, limits=limits) as client:
         async def guarded(i: int) -> dict[str, Any]:
             async with sem:
-                # Stagger requests within each concurrency slot to spread load
                 slot_delay = delay * (i % concurrency) / concurrency if delay > 0 else 0
                 return await fire_one(client, base_url, i, kinds[i - 1], slot_delay)
 
@@ -173,8 +172,8 @@ def save_stats_to_csv(
     successful = len(results) - len(failures)
     latencies = [float(r["elapsed_s"]) for r in results if r["status"] == 200 and r.get("elapsed_s") is not None]
 
-    small_to_gpu = sum(c for (k, w), c in by_kind_worker.items() if k == "small" and w and "groq" in w)
-    large_to_cpu = sum(c for (k, w), c in by_kind_worker.items() if k == "large" and w and "groq" not in w)
+    small_to_gpu = sum(c for (kind, worker_id), c in by_kind_worker.items() if kind == "small" and _is_gpu_worker(worker_id))
+    large_to_cpu = sum(c for (kind, worker_id), c in by_kind_worker.items() if kind == "large" and worker_id and not _is_gpu_worker(worker_id))
     cpu_workers = len({r["worker_id"] for r in results if r["status"] == 200 and not _is_gpu_worker(r["worker_id"])})
     gpu_workers = len({r["worker_id"] for r in results if r["status"] == 200 and _is_gpu_worker(r["worker_id"])})
     cpu_busy_s = sum(float(r["elapsed_s"]) for r in results if r["status"] == 200 and not _is_gpu_worker(r["worker_id"]))
@@ -207,18 +206,18 @@ def save_stats_to_csv(
         writer.writerow(["Observed GPU Utilization (%)", round(gpu_utilization, 1)])
         writer.writerow(["Successful Requests", successful])
         writer.writerow(["Failed Requests", len(failures)])
-        writer.writerow(["  → Client timeouts", timeout_errors])
-        writer.writerow(["  → Server 503s", server_503])
-        writer.writerow(["Small→GPU (Saturation)", small_to_gpu])
-        writer.writerow(["Large→CPU (Should be 0)", large_to_cpu])
+        writer.writerow(["  -> Client timeouts", timeout_errors])
+        writer.writerow(["  -> Server 503s", server_503])
+        writer.writerow(["Small->GPU (Saturation)", small_to_gpu])
+        writer.writerow(["Large->CPU (Should be 0)", large_to_cpu])
         writer.writerow([""])
         writer.writerow(["Worker Distribution", "Count"])
-        for w, c in sorted(by_worker.items()):
-            writer.writerow([w, c])
+        for worker_id, count in sorted(by_worker.items()):
+            writer.writerow([worker_id, count])
         writer.writerow([""])
-        writer.writerow(["Kind→Worker Distribution", "Count"])
-        for (kind, w), c in sorted(by_kind_worker.items()):
-            writer.writerow([f"{kind}→{w}", c])
+        writer.writerow(["Kind->Worker Distribution", "Count"])
+        for (kind, worker_id), count in sorted(by_kind_worker.items()):
+            writer.writerow([f"{kind}->{worker_id}", count])
 
     return str(stats_csv)
 
@@ -228,32 +227,44 @@ def main() -> None:
     parser.add_argument("--base-url", default="http://localhost:7001", help="Master base URL (default: master1)")
     parser.add_argument("--requests", type=int, default=20)
     parser.add_argument("--concurrency", type=int, default=8)
-    parser.add_argument("--large-ratio", type=float, default=0.3,
-                        help="Fraction of requests that should force GPU routing (max_new_tokens=300)")
-    parser.add_argument("--delay", type=float, default=0.0,
-                        help="Seconds to stagger between each concurrency slot (e.g. 1.0 for ~1 req/s per slot)")
-    parser.add_argument("--seed", type=int, default=0,
-                        help="RNG seed for reproducible large/small mix (default: 0)")
+    parser.add_argument(
+        "--large-ratio",
+        type=float,
+        default=0.3,
+        help="Fraction of requests that should force GPU routing to modal workers (max_new_tokens=300)",
+    )
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.0,
+        help="Seconds to stagger between each concurrency slot (e.g. 1.0 for ~1 req/s per slot)",
+    )
+    parser.add_argument("--seed", type=int, default=0, help="RNG seed for reproducible large/small mix (default: 0)")
     parser.add_argument("--csv", action="store_true", help="Save per-request and aggregate results to logs/")
     args = parser.parse_args()
 
     started_at = time.monotonic()
 
-    results = asyncio.run(run(
-        base_url=args.base_url.rstrip("/"),
-        total=args.requests,
-        concurrency=args.concurrency,
-        large_ratio=args.large_ratio,
-        seed=args.seed,
-        delay=args.delay,
-    ))
+    results = asyncio.run(
+        run(
+            base_url=args.base_url.rstrip("/"),
+            total=args.requests,
+            concurrency=args.concurrency,
+            large_ratio=args.large_ratio,
+            seed=args.seed,
+            delay=args.delay,
+        )
+    )
 
     print("Per-request results:")
-    for r in results:
-        if r["status"] == 200:
-            print(f"  req={r['index']:03d} kind={r['kind']:5s} status=200 worker={r['worker_id']} ({r['elapsed_s']}s)")
+    for result in results:
+        if result["status"] == 200:
+            print(
+                f"  req={result['index']:03d} kind={result['kind']:5s} "
+                f"status=200 worker={result['worker_id']} ({result['elapsed_s']}s)"
+            )
         else:
-            print(f"  req={r['index']:03d} kind={r['kind']:5s} status={r['status']} error={r['error']}")
+            print(f"  req={result['index']:03d} kind={result['kind']:5s} status={result['status']} error={result['error']}")
 
     by_worker = Counter(r["worker_id"] for r in results if r["status"] == 200)
     by_kind_worker = Counter((r["kind"], r["worker_id"]) for r in results if r["status"] == 200)
@@ -261,16 +272,16 @@ def main() -> None:
     successful = len(results) - len(failures)
 
     print("\nDistribution by worker:")
-    for w, c in sorted(by_worker.items()):
-        print(f"  {w}: {c}")
+    for worker_id, count in sorted(by_worker.items()):
+        print(f"  {worker_id}: {count}")
 
     print("\nDistribution by (kind, worker):")
-    for (kind, w), c in sorted(by_kind_worker.items()):
-        print(f"  {kind:5s} → {w}: {c}")
+    for (kind, worker_id), count in sorted(by_kind_worker.items()):
+        print(f"  {kind:5s} -> {worker_id}: {count}")
 
     print("\nSanity checks:")
-    small_to_gpu = sum(c for (k, w), c in by_kind_worker.items() if k == "small" and w and "groq" in w)
-    large_to_cpu = sum(c for (k, w), c in by_kind_worker.items() if k == "large" and w and "groq" not in w)
+    small_to_gpu = sum(c for (kind, worker_id), c in by_kind_worker.items() if kind == "small" and _is_gpu_worker(worker_id))
+    large_to_cpu = sum(c for (kind, worker_id), c in by_kind_worker.items() if kind == "large" and worker_id and not _is_gpu_worker(worker_id))
     print(f"  small requests routed to GPU (saturation fallback): {small_to_gpu}")
     print(f"  large requests routed to CPU (should be 0):          {large_to_cpu}")
 
@@ -288,7 +299,7 @@ def main() -> None:
     gpu_busy_s = sum(float(r["elapsed_s"]) for r in results if r["status"] == 200 and _is_gpu_worker(r["worker_id"]))
     cpu_utilization = min(100.0, (cpu_busy_s / (cpu_workers * duration_s) * 100.0)) if cpu_workers else 0.0
     gpu_utilization = min(100.0, (gpu_busy_s / (gpu_workers * duration_s) * 100.0)) if gpu_workers else 0.0
-    print(f"\nResults: {successful}/{len(results)} succeeded ({100*successful//len(results)}%)")
+    print(f"\nResults: {successful}/{len(results)} succeeded ({100 * successful // len(results)}%)")
     print(f"  throughput: {throughput:.2f} req/s")
     print(f"  latency: avg={avg_latency:.2f}s median={median_latency:.2f}s p95={p95_latency:.2f}s")
     print(f"  cpu utilization: {cpu_utilization:.1f}%")
@@ -296,9 +307,9 @@ def main() -> None:
     if failures:
         print(f"Failures: {len(failures)} total")
         if timeout_errors:
-            print(f"  client timeouts:  {timeout_errors}  ← concurrency too high or Groq RPM exhausted")
+            print(f"  client timeouts:  {timeout_errors}  <- concurrency too high or the remote GPU backend saturated")
         if server_503:
-            print(f"  server 503s:      {server_503}  ← master queue wait timed out (all workers busy/cooling)")
+            print(f"  server 503s:      {server_503}  <- master queue wait timed out (all workers busy/cooling)")
         other = len(failures) - timeout_errors - server_503
         if other:
             print(f"  other errors:     {other}")
@@ -312,7 +323,7 @@ def main() -> None:
             args.large_ratio,
             duration_s,
         )
-        print(f"\n✓ Stats saved to: {csv_file}")
+        print(f"\nSaved stats to: {csv_file}")
 
 
 if __name__ == "__main__":

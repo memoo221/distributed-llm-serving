@@ -143,7 +143,7 @@ class Forwarder:
             tried.append(worker.worker_id)
             exclude.add(worker.worker_id)
 
-            # GPU workers run groq_worker.py which expects {"prompt": ...};
+            # GPU workers speak the remote-worker contract: {"prompt": ...}.
             # CPU workers run worker_router.py which expects {"question": ...}.
             if worker.device_type == "gpu":
                 payload = {"prompt": prompt, "max_new_tokens": max_new_tokens}
