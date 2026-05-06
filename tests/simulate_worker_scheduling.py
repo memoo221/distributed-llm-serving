@@ -139,7 +139,7 @@ async def run(
     sem = asyncio.Semaphore(concurrency)
     limits = httpx.Limits(max_connections=concurrency, max_keepalive_connections=concurrency)
 
-    async with httpx.AsyncClient(timeout=240.0, limits=limits) as client:
+    async with httpx.AsyncClient(timeout=9000.0, limits=limits) as client:
         async def guarded(i: int) -> dict[str, Any]:
             async with sem:
                 slot_delay = delay * (i % concurrency) / concurrency if delay > 0 else 0
