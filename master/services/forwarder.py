@@ -170,5 +170,36 @@ class Forwarder:
 
         raise AllRetriesFailed(tried)
 
+    async def forward_to_worker(
+        self,
+        worker,
+        prompt: str,
+        max_new_tokens: int,
+    ) -> dict:
+        """Forward a single request to a specific worker.
+
+        This is intentionally small and does not do scheduling; higher-level
+        components (e.g. MasterNode) decide which worker to use and handle
+        retries/backpressure.
+        """
+        headers = {"X-API-Key": self._api_key} if self._api_key else {}
+
+        # GPU workers run groq_worker.py which expects {"prompt": ...};
+        # CPU workers run worker_router.py which expects {"question": ...}.
+        if getattr(worker, "device_type", None) == "gpu":
+            payload = {"prompt": prompt, "max_new_tokens": max_new_tokens}
+        else:
+            payload = {"question": prompt, "max_new_tokens": max_new_tokens}
+
+        resp = await self._client.post(
+            f"{worker.url}/generate",
+            json=payload,
+            headers=headers,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        data["worker_id"] = worker.worker_id
+        return data
+
     async def close(self) -> None:
         await self._client.aclose()

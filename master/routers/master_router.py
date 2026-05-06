@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from master.services.forwarder import AllRetriesFailed, NoWorkerAvailable
+from master.master_node import MasterQueueFull, MasterRequestTimeout
 
 
 MASTER_ID = os.getenv("MASTER_ID", "master-unknown")
@@ -66,15 +67,14 @@ async def list_workers(request: Request) -> dict[str, Any]:
 
 @router.post("/generate")
 async def generate(payload: GenerateRequest, request: Request) -> dict[str, Any]:
-    registry = request.app.state.registry
-    forwarder = request.app.state.forwarder
+    master_node = request.app.state.master_node
 
     try:
-        result = await forwarder.forward_generate(
-            registry,
-            payload.prompt,
-            payload.max_new_tokens,
-        )
+        result = await master_node.generate(payload.prompt, payload.max_new_tokens)
+    except MasterQueueFull as exc:
+        raise HTTPException(status_code=429, detail=str(exc))
+    except MasterRequestTimeout as exc:
+        raise HTTPException(status_code=504, detail=str(exc))
     except NoWorkerAvailable as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except AllRetriesFailed as exc:

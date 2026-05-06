@@ -36,6 +36,27 @@ RETRY_DELAYS: list[float] = [0.1, 0.3]
 # Workers heartbeat every 5 s, so 30 s = ~6 heartbeat cycles.
 QUEUE_WAIT_TIMEOUT: float = float(os.getenv("QUEUE_WAIT_TIMEOUT", "120.0"))
 
+# -----------------
+# Master-side queue
+# -----------------
+
+# Max number of pending requests queued inside a master before applying backpressure.
+MASTER_QUEUE_MAXSIZE: int = int(os.getenv("MASTER_QUEUE_MAXSIZE", "2000"))
+
+# Scheduler tick period in seconds: every tick, we attempt to dispatch up to
+# SCHEDULER_MAX_DISPATCH_PER_TICK requests from the queue.
+SCHEDULER_TICK_SEC: float = float(os.getenv("SCHEDULER_TICK_SEC", "0.2"))
+
+# Max number of requests to attempt dispatch per scheduler tick.
+SCHEDULER_MAX_DISPATCH_PER_TICK: int = int(
+    os.getenv("SCHEDULER_MAX_DISPATCH_PER_TICK", "64")
+)
+
+# Max time a request is allowed to wait in the master queue before timing out.
+MASTER_REQUEST_DEADLINE_SEC: float = float(
+    os.getenv("MASTER_REQUEST_DEADLINE_SEC", "300.0")
+)
+
 # Static worker list bootstrapped from env so workers are reachable before
 # their first heartbeat arrives. JSON list: [{worker_id, url, device_type}]
 # Each master must set its own list — pools must not overlap.
