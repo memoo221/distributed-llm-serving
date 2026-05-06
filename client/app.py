@@ -61,6 +61,14 @@ async def post_stop(action: ServiceAction) -> dict:
         raise HTTPException(500, str(exc))
 
 
+@app.post("/api/services/start-all")
+async def post_start_all() -> dict:
+    try:
+        return await docker_control.start_all()
+    except docker_control.DockerError as exc:
+        raise HTTPException(500, str(exc))
+
+
 class RunRequest(BaseModel):
     target_url: str = Field(default="http://localhost:8008/generate")
     total_requests: int = Field(default=100, ge=1, le=100_000)

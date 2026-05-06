@@ -132,6 +132,18 @@ async def stop_service(name: str) -> dict[str, Any]:
     return {"name": name, "action": "stop", "ok": True}
 
 
+async def start_all() -> dict[str, Any]:
+    """Bring up every service defined in docker-compose.yml.
+
+    `docker compose up -d` with no service argument starts all services. Build
+    can take a while on first run, hence the longer timeout.
+    """
+    rc, stdout, stderr = await _run("docker", "compose", "up", "-d", timeout=600.0)
+    if rc != 0:
+        raise DockerError(f"failed to start all: {stderr.strip() or stdout.strip()}")
+    return {"action": "start_all", "ok": True}
+
+
 async def docker_available() -> bool:
     try:
         rc, _, _ = await _run("docker", "compose", "version", timeout=10.0)

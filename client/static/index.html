@@ -218,7 +218,10 @@
   <div>
     <div class="panel" style="margin-bottom: 16px;">
       <h2>Nodes
-        <button id="refreshServices" class="ghost small" style="float:right; margin-top:-4px;">Refresh</button>
+        <span style="float:right; margin-top:-4px; display:inline-flex; gap:6px;">
+          <button id="startAllServices" class="small">Start all</button>
+          <button id="refreshServices" class="ghost small">Refresh</button>
+        </span>
       </h2>
       <div id="services" class="service-list">
         <div class="empty">Loading…</div>
@@ -427,6 +430,24 @@ $("services").addEventListener("click", (ev) => {
 });
 
 $("refreshServices").addEventListener("click", loadServices);
+
+$("startAllServices").addEventListener("click", async () => {
+  const btn = $("startAllServices");
+  const prev = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Starting…";
+  try {
+    toast("starting all services (may take a minute on first build)…");
+    await api("/api/services/start-all", { method: "POST" });
+    toast("all services started");
+    loadServices();
+  } catch (e) {
+    toast(`start all failed: ${e.message}`, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
+  }
+});
 
 function fmtNum(n) {
   if (n === null || n === undefined) return "—";
