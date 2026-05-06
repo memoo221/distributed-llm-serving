@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>distributed-llm-serving — test UI</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1f2330;
+    --border: #2a2f3d;
+    --text: #e6e8ee;
+    --muted: #9aa3b2;
+    --accent: #5b8def;
+    --ok: #3ddc97;
+    --warn: #ffb454;
+    --err: #ff6b6b;
+    --running: #6cb1ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  main {
+    display: grid;
+    grid-template-columns: 360px 1fr;
+    gap: 16px;
+    padding: 16px;
+    max-width: 1600px;
+    margin: 0 auto;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .panel h2 {
+    margin: 0 0 12px;
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+  }
+  label {
+    display: block;
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 4px;
+    margin-top: 10px;
+  }
+  input[type="text"], input[type="number"], textarea {
+    width: 100%;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    color: var(--text);
+    font: inherit;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px;
+  }
+  input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 60px; }
+  button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:hover { filter: brightness(1.1); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.ghost {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+    font-weight: 500;
+  }
+  button.danger { background: var(--err); }
+  button.small { padding: 4px 8px; font-size: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > * { flex: 1; }
+
+  .service-list { display: flex; flex-direction: column; gap: 6px; }
+  .service {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    gap: 8px;
+  }
+  .service .name {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+  }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .badge.running { background: rgba(61, 220, 151, 0.15); color: var(--ok); }
+  .badge.exited, .badge.stopped, .badge.unknown { background: rgba(154, 163, 178, 0.15); color: var(--muted); }
+  .badge.restarting, .badge.starting { background: rgba(255, 180, 84, 0.15); color: var(--warn); }
+  .service-actions { display: flex; gap: 6px; }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .stat {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+  }
+  .stat .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .stat .value { font-size: 20px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .stat .value.ok { color: var(--ok); }
+  .stat .value.err { color: var(--err); }
+
+  .progress {
+    height: 8px;
+    background: var(--panel-2);
+    border-radius: 4px;
+    overflow: hidden;
+    margin: 8px 0 16px;
+  }
+  .progress-bar {
+    height: 100%;
+    background: var(--accent);
+    width: 0%;
+    transition: width 0.2s ease;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  th, td {
+    text-align: left;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; }
+  tr:hover td { background: var(--panel-2); }
+  td.status-200 { color: var(--ok); }
+  td.status-bad { color: var(--err); }
+
+  .breakdown {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  .breakdown-block {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+  }
+  .breakdown-block h3 { margin: 0 0 6px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 500; }
+  .kv { display: flex; justify-content: space-between; font-family: ui-monospace, monospace; font-size: 12px; padding: 2px 0; }
+  .kv .k { color: var(--muted); }
+
+  .toast {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 14px;
+    max-width: 400px;
+    z-index: 100;
+    display: none;
+  }
+  .toast.show { display: block; }
+  .toast.err { border-color: var(--err); }
+  .empty { color: var(--muted); font-style: italic; padding: 12px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>distributed-llm-serving</h1>
+  <span class="sub">test UI · localhost:8050</span>
+</header>
+
+<main>
+  <!-- LEFT: nodes + test config -->
+  <div>
+    <div class="panel" style="margin-bottom: 16px;">
+      <h2>Nodes
+        <button id="refreshServices" class="ghost small" style="float:right; margin-top:-4px;">Refresh</button>
+      </h2>
+      <div id="services" class="service-list">
+        <div class="empty">Loading…</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Run Load Test</h2>
+      <label for="targetUrl">Target URL</label>
+      <input type="text" id="targetUrl" value="http://localhost:8008/generate" />
+
+      <div class="row">
+        <div>
+          <label for="totalRequests">Requests</label>
+          <input type="number" id="totalRequests" value="100" min="1" />
+        </div>
+        <div>
+          <label for="concurrency">Concurrency</label>
+          <input type="number" id="concurrency" value="20" min="1" />
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label for="maxNewTokens">max_new_tokens</label>
+          <input type="number" id="maxNewTokens" value="64" min="1" max="512" />
+        </div>
+        <div>
+          <label for="timeoutSec">Timeout (s)</label>
+          <input type="number" id="timeoutSec" value="600" min="1" />
+        </div>
+      </div>
+
+      <label for="prompt">Prompt</label>
+      <textarea id="prompt">Write a short haiku about distributed systems.</textarea>
+
+      <div class="row" style="margin-top: 16px;">
+        <button id="runBtn">Run</button>
+        <button id="cancelBtn" class="danger" disabled>Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: live results -->
+  <div>
+    <div class="panel">
+      <h2>Run Status <span id="runIdLabel" style="color: var(--muted); font-weight: 400; font-family: ui-monospace, monospace; font-size: 11px;"></span></h2>
+
+      <div class="stats">
+        <div class="stat">
+          <div class="label">Completed</div>
+          <div class="value" id="statCompleted">0 / 0</div>
+        </div>
+        <div class="stat">
+          <div class="label">Succeeded</div>
+          <div class="value ok" id="statSucceeded">0</div>
+        </div>
+        <div class="stat">
+          <div class="label">Failed</div>
+          <div class="value err" id="statFailed">0</div>
+        </div>
+        <div class="stat">
+          <div class="label">Throughput</div>
+          <div class="value" id="statThroughput">— req/s</div>
+        </div>
+        <div class="stat">
+          <div class="label">Elapsed</div>
+          <div class="value" id="statElapsed">0s</div>
+        </div>
+        <div class="stat">
+          <div class="label">p50</div>
+          <div class="value" id="statP50">—</div>
+        </div>
+        <div class="stat">
+          <div class="label">p95</div>
+          <div class="value" id="statP95">—</div>
+        </div>
+        <div class="stat">
+          <div class="label">p99</div>
+          <div class="value" id="statP99">—</div>
+        </div>
+      </div>
+
+      <div class="progress"><div id="progressBar" class="progress-bar"></div></div>
+
+      <div class="breakdown">
+        <div class="breakdown-block">
+          <h3>By Worker</h3>
+          <div id="workerCounts" class="empty">no data yet</div>
+        </div>
+        <div class="breakdown-block">
+          <h3>By Master / Status</h3>
+          <div id="masterCounts" class="empty">no data yet</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top: 16px;">
+      <h2>Recent Requests (live tail)</h2>
+      <div style="max-height: 360px; overflow-y: auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Status</th>
+              <th>Latency (s)</th>
+              <th>Worker</th>
+              <th>Master</th>
+              <th>Error</th>
+            </tr>
+          </thead>
+          <tbody id="recentBody">
+            <tr><td colspan="6" class="empty">no requests yet</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</main>
+
+<div id="toast" class="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let currentRunId = null;
+let pollHandle = null;
+
+function toast(msg, isErr = false) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.toggle("err", !!isErr);
+  t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 3500);
+}
+
+async function api(path, opts = {}) {
+  const resp = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...opts,
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`${resp.status} ${text}`);
+  }
+  return resp.json();
+}
+
+async function loadServices() {
+  const list = $("services");
+  list.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const { services } = await api("/api/services");
+    if (!services.length) {
+      list.innerHTML = '<div class="empty">no services defined</div>';
+      return;
+    }
+    list.innerHTML = "";
+    for (const s of services) {
+      const row = document.createElement("div");
+      row.className = "service";
+      const state = (s.state || "stopped").toLowerCase();
+      row.innerHTML = `
+        <div>
+          <div class="name">${s.name}</div>
+          <span class="badge ${state}">${state}</span>
+        </div>
+        <div class="service-actions">
+          <button class="ghost small" data-action="start" data-name="${s.name}">Start</button>
+          <button class="ghost small" data-action="stop" data-name="${s.name}">Stop</button>
+        </div>
+      `;
+      list.appendChild(row);
+    }
+  } catch (e) {
+    list.innerHTML = `<div class="empty">error: ${e.message}</div>`;
+  }
+}
+
+async function serviceAction(name, action) {
+  try {
+    toast(`${action} ${name}…`);
+    await api(`/api/services/${action}`, {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+    toast(`${action} ${name} ok`);
+    loadServices();
+  } catch (e) {
+    toast(`${action} ${name} failed: ${e.message}`, true);
+  }
+}
+
+$("services").addEventListener("click", (ev) => {
+  const btn = ev.target.closest("button[data-action]");
+  if (!btn) return;
+  serviceAction(btn.dataset.name, btn.dataset.action);
+});
+
+$("refreshServices").addEventListener("click", loadServices);
+
+function fmtNum(n) {
+  if (n === null || n === undefined) return "—";
+  return n.toString();
+}
+
+function renderKV(elem, obj) {
+  const entries = Object.entries(obj || {});
+  if (!entries.length) {
+    elem.innerHTML = '<div class="empty">no data yet</div>';
+    elem.classList.add("empty");
+    return;
+  }
+  elem.classList.remove("empty");
+  elem.innerHTML = entries
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `<div class="kv"><span class="k">${k}</span><span>${v}</span></div>`)
+    .join("");
+}
+
+function renderSnapshot(s) {
+  $("runIdLabel").textContent = `· ${s.run_id} · ${s.target_url}`;
+  $("statCompleted").textContent = `${s.completed} / ${s.total_requests}`;
+  $("statSucceeded").textContent = fmtNum(s.succeeded);
+  $("statFailed").textContent = fmtNum(s.failed);
+  $("statThroughput").textContent = `${s.throughput_rps ?? 0} req/s`;
+  $("statElapsed").textContent = `${s.elapsed_sec ?? 0}s`;
+  $("statP50").textContent = s.p50_sec !== null ? `${s.p50_sec}s` : "—";
+  $("statP95").textContent = s.p95_sec !== null ? `${s.p95_sec}s` : "—";
+  $("statP99").textContent = s.p99_sec !== null ? `${s.p99_sec}s` : "—";
+
+  const pct = s.total_requests ? (s.completed / s.total_requests) * 100 : 0;
+  $("progressBar").style.width = pct + "%";
+
+  renderKV($("workerCounts"), s.worker_counts);
+  const combined = { ...s.master_counts };
+  for (const [code, cnt] of Object.entries(s.status_counts || {})) {
+    combined[`status_${code}`] = cnt;
+  }
+  renderKV($("masterCounts"), combined);
+
+  const body = $("recentBody");
+  if (!s.recent || !s.recent.length) {
+    body.innerHTML = '<tr><td colspan="6" class="empty">no requests yet</td></tr>';
+  } else {
+    body.innerHTML = s.recent
+      .slice()
+      .reverse()
+      .map((r) => {
+        const okClass = r.status_code === 200 ? "status-200" : "status-bad";
+        return `<tr>
+          <td>${r.index}</td>
+          <td class="${okClass}">${r.status_code ?? "ERR"}</td>
+          <td>${r.latency_sec}</td>
+          <td>${r.worker_id ?? "—"}</td>
+          <td>${r.master_id ?? "—"}</td>
+          <td>${r.error ? r.error.replace(/</g, "&lt;").slice(0, 80) : ""}</td>
+        </tr>`;
+      })
+      .join("");
+  }
+}
+
+async function pollRun() {
+  if (!currentRunId) return;
+  try {
+    const s = await api(`/api/run/${currentRunId}`);
+    renderSnapshot(s);
+    if (s.finished || s.cancelled) {
+      stopPolling();
+      $("runBtn").disabled = false;
+      $("cancelBtn").disabled = true;
+      if (s.error) toast(`run error: ${s.error}`, true);
+      else if (s.cancelled) toast("run cancelled");
+      else toast(`done: ${s.succeeded}/${s.total_requests} ok in ${s.elapsed_sec}s`);
+    }
+  } catch (e) {
+    toast(`poll failed: ${e.message}`, true);
+    stopPolling();
+  }
+}
+
+function startPolling() {
+  stopPolling();
+  pollHandle = setInterval(pollRun, 500);
+}
+
+function stopPolling() {
+  if (pollHandle) clearInterval(pollHandle);
+  pollHandle = null;
+}
+
+$("runBtn").addEventListener("click", async () => {
+  const body = {
+    target_url: $("targetUrl").value.trim(),
+    total_requests: parseInt($("totalRequests").value, 10),
+    concurrency: parseInt($("concurrency").value, 10),
+    prompt: $("prompt").value,
+    max_new_tokens: parseInt($("maxNewTokens").value, 10),
+    request_timeout_sec: parseFloat($("timeoutSec").value),
+  };
+  try {
+    $("runBtn").disabled = true;
+    const { run_id } = await api("/api/run", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    currentRunId = run_id;
+    $("cancelBtn").disabled = false;
+    toast(`started run ${run_id}`);
+    startPolling();
+    pollRun();
+  } catch (e) {
+    $("runBtn").disabled = false;
+    toast(`failed to start: ${e.message}`, true);
+  }
+});
+
+$("cancelBtn").addEventListener("click", async () => {
+  if (!currentRunId) return;
+  try {
+    await api(`/api/run/${currentRunId}/cancel`, { method: "POST" });
+    toast("cancel requested");
+  } catch (e) {
+    toast(`cancel failed: ${e.message}`, true);
+  }
+});
+
+loadServices();
+</script>
+</body>
+</html>
