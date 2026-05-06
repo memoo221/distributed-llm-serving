@@ -1,0 +1,44 @@
+Metric,Value
+Base URL,http://localhost:8008
+Total Requests,200
+Concurrency,100
+Large Ratio,0.3
+Run Duration (s),17.12
+Throughput (successful req/s),11.68
+Average Latency (s),2.73
+Median Latency (s),2.45
+P95 Latency (s),6.59
+Observed CPU Utilization (%),93.8
+Observed GPU Utilization (%),100.0
+Successful Requests,200
+Failed Requests,0
+  → Client timeouts,0
+  → Server 503s,0
+Small→GPU (Saturation),146
+Large→CPU (Should be 0),0
+""
+Worker Distribution,Count
+groq_worker_1_2,33
+groq_worker_1_3,33
+groq_worker_1_4,33
+groq_worker_2_2,33
+groq_worker_2_3,33
+groq_worker_2_4,33
+worker_1_1,1
+worker_2_1,1
+""
+Kind→Worker Distribution,Count
+large→groq_worker_1_2,8
+large→groq_worker_1_3,7
+large→groq_worker_1_4,9
+large→groq_worker_2_2,7
+large→groq_worker_2_3,7
+large→groq_worker_2_4,14
+small→groq_worker_1_2,25
+small→groq_worker_1_3,26
+small→groq_worker_1_4,24
+small→groq_worker_2_2,26
+small→groq_worker_2_3,26
+small→groq_worker_2_4,19
+small→worker_1_1,1
+small→worker_2_1,1
