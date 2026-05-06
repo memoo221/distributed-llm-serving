@@ -10,8 +10,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import csv
+import io
+
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from client import docker_control, runner
@@ -107,6 +110,30 @@ async def get_run_results(run_id: str) -> dict:
             for r in state.results
         ],
     }
+
+
+@app.get("/api/run/{run_id}/csv")
+async def get_run_csv(run_id: str) -> Response:
+    state = runner.get_run(run_id)
+    if state is None:
+        raise HTTPException(404, "run not found")
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["index", "status_code", "latency_sec", "worker_id", "master_id", "error"])
+    for r in state.results:
+        writer.writerow([
+            r.index,
+            r.status_code if r.status_code is not None else "",
+            f"{r.latency_sec:.3f}",
+            r.worker_id or "",
+            r.master_id or "",
+            (r.error or "").replace("\n", " ").replace("\r", " "),
+        ])
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="run_{run_id}.csv"'},
+    )
 
 
 @app.post("/api/run/{run_id}/cancel")

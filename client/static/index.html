@@ -317,8 +317,14 @@
     </div>
 
     <div class="panel" style="margin-top: 16px;">
-      <h2>Recent Requests (live tail)</h2>
-      <div style="max-height: 360px; overflow-y: auto;">
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+        <h2 style="margin:0;">Logs <span id="logsMode" style="color: var(--muted); font-weight: 400; font-size: 11px; text-transform: none; letter-spacing: 0;">live tail (last 50)</span></h2>
+        <div class="row" style="flex: 0 0 auto; gap:6px;">
+          <button id="toggleLogsBtn" class="ghost small" disabled>Show all</button>
+          <button id="exportCsvBtn" class="ghost small" disabled>Export CSV</button>
+        </div>
+      </div>
+      <div style="max-height: 420px; overflow-y: auto;">
         <table>
           <thead>
             <tr>
@@ -345,6 +351,9 @@
 const $ = (id) => document.getElementById(id);
 let currentRunId = null;
 let pollHandle = null;
+// Logs panel: when true, renders the full result list from /results;
+// when false (default), renders the live tail (last 50) from the snapshot.
+let showAllLogs = false;
 
 function toast(msg, isErr = false) {
   const t = $("toast");
@@ -459,25 +468,42 @@ function renderSnapshot(s) {
   }
   renderKV($("masterCounts"), combined);
 
+  if (!showAllLogs) {
+    renderLogRows(s.recent || []);
+  }
+}
+
+function renderLogRows(rows) {
   const body = $("recentBody");
-  if (!s.recent || !s.recent.length) {
+  if (!rows.length) {
     body.innerHTML = '<tr><td colspan="6" class="empty">no requests yet</td></tr>';
-  } else {
-    body.innerHTML = s.recent
-      .slice()
-      .reverse()
-      .map((r) => {
-        const okClass = r.status_code === 200 ? "status-200" : "status-bad";
-        return `<tr>
-          <td>${r.index}</td>
-          <td class="${okClass}">${r.status_code ?? "ERR"}</td>
-          <td>${r.latency_sec}</td>
-          <td>${r.worker_id ?? "—"}</td>
-          <td>${r.master_id ?? "—"}</td>
-          <td>${r.error ? r.error.replace(/</g, "&lt;").slice(0, 80) : ""}</td>
-        </tr>`;
-      })
-      .join("");
+    return;
+  }
+  body.innerHTML = rows
+    .slice()
+    .reverse()
+    .map((r) => {
+      const okClass = r.status_code === 200 ? "status-200" : "status-bad";
+      const err = r.error ? r.error.replace(/</g, "&lt;").slice(0, 80) : "";
+      return `<tr>
+        <td>${r.index}</td>
+        <td class="${okClass}">${r.status_code ?? "ERR"}</td>
+        <td>${r.latency_sec}</td>
+        <td>${r.worker_id ?? "—"}</td>
+        <td>${r.master_id ?? "—"}</td>
+        <td>${err}</td>
+      </tr>`;
+    })
+    .join("");
+}
+
+async function refreshFullLogs() {
+  if (!currentRunId) return;
+  try {
+    const { results } = await api(`/api/run/${currentRunId}/results`);
+    renderLogRows(results);
+  } catch (e) {
+    toast(`fetch results failed: ${e.message}`, true);
   }
 }
 
@@ -486,10 +512,19 @@ async function pollRun() {
   try {
     const s = await api(`/api/run/${currentRunId}`);
     renderSnapshot(s);
+    if (showAllLogs) {
+      // Refresh the full log too while in "all" mode. Throttle to every other
+      // tick (~1s) since this can be heavy at 1000+ rows.
+      if (!pollRun._tick) pollRun._tick = 0;
+      pollRun._tick++;
+      if (pollRun._tick % 2 === 0) await refreshFullLogs();
+    }
     if (s.finished || s.cancelled) {
       stopPolling();
       $("runBtn").disabled = false;
       $("cancelBtn").disabled = true;
+      // Final repaint: if in "all" mode, ensure the table reflects every result.
+      if (showAllLogs) await refreshFullLogs();
       if (s.error) toast(`run error: ${s.error}`, true);
       else if (s.cancelled) toast("run cancelled");
       else toast(`done: ${s.succeeded}/${s.total_requests} ok in ${s.elapsed_sec}s`);
@@ -527,6 +562,11 @@ $("runBtn").addEventListener("click", async () => {
     });
     currentRunId = run_id;
     $("cancelBtn").disabled = false;
+    $("toggleLogsBtn").disabled = false;
+    $("exportCsvBtn").disabled = false;
+    showAllLogs = false;
+    $("toggleLogsBtn").textContent = "Show all";
+    $("logsMode").textContent = "live tail (last 50)";
     toast(`started run ${run_id}`);
     startPolling();
     pollRun();
@@ -534,6 +574,28 @@ $("runBtn").addEventListener("click", async () => {
     $("runBtn").disabled = false;
     toast(`failed to start: ${e.message}`, true);
   }
+});
+
+$("toggleLogsBtn").addEventListener("click", async () => {
+  if (!currentRunId) return;
+  showAllLogs = !showAllLogs;
+  if (showAllLogs) {
+    $("toggleLogsBtn").textContent = "Show tail";
+    $("logsMode").textContent = "all results";
+    await refreshFullLogs();
+  } else {
+    $("toggleLogsBtn").textContent = "Show all";
+    $("logsMode").textContent = "live tail (last 50)";
+    // The next poll tick will repaint the tail; trigger one immediately.
+    pollRun();
+  }
+});
+
+$("exportCsvBtn").addEventListener("click", () => {
+  if (!currentRunId) return;
+  // Trigger a download by navigating to the CSV endpoint. Content-Disposition
+  // attachment header makes the browser save instead of render.
+  window.location.href = `/api/run/${currentRunId}/csv`;
 });
 
 $("cancelBtn").addEventListener("click", async () => {
