@@ -54,7 +54,7 @@ SCHEDULER_MAX_DISPATCH_PER_TICK: int = int(
 
 # Max time a request is allowed to wait in the master queue before timing out.
 MASTER_REQUEST_DEADLINE_SEC: float = float(
-    os.getenv("MASTER_REQUEST_DEADLINE_SEC", "300.0")
+    os.getenv("MASTER_REQUEST_DEADLINE_SEC", "500.0")
 )
 
 # Static worker list bootstrapped from env so workers are reachable before
