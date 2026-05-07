@@ -6,6 +6,9 @@ torch>=2.2.0
 transformers>=4.38.0
 chromadb==0.4.22
 sentence-transformers>=2.5.0
+qdrant-client>=1.7.0
+python-multipart>=0.0.9
+pypdf>=4.2.0
 prometheus-client==0.19.0
 numpy>=1.26.0
 matplotlib>=3.8.0

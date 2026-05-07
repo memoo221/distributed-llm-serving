@@ -4,18 +4,24 @@
 
 This project implements a distributed system for handling concurrent LLM inference requests with load balancing, scheduler-driven worker selection, heartbeat-based health monitoring, and fault tolerance.
 
-Current request flow:
+Request flow (two entrypoints):
 
 ```
+# Direct inference (no retrieval)
 Client → NGINX:8008 → Master Nodes:7000 → Worker Nodes (local CPU + Groq cloud)
+
+# RAG inference (retrieval + prompt enhancement)
+Client → NGINX:8008 (/rag/*) → RAG Service → Master Node (selected by NGINX) → Worker Nodes
 ```
+
+In the RAG path, NGINX selects a `master_id` per request and forwards it to the RAG service via the `X-Master-Id` header. The RAG service then forwards the enhanced prompt to that specific master.
 
 Workers are heterogeneous:
 
 - **CPU workers** load Qwen 2.5 0.5B locally and serve from a single in-process slot.
 - **Groq workers** are thin FastAPI shims that forward to the Groq cloud API (`llama-3.1-8b-instant`). They count as `device_type: "gpu"` for scheduling.
 
-The master's scheduler does threshold-based routing: requests with an estimated token score ≥ 256 go GPU-only; smaller requests prefer CPU via JSQ(2), with a fallback to GPU when the CPU pool saturates ([master/services/scheduler.py](master/services/scheduler.py)).
+The master's scheduler does threshold-based routing: requests with an estimated token score ≥ 256 go GPU-only; smaller requests prefer GPU while it has headroom, and overflow to CPU via JSQ(2) when GPU is busy ([master/services/scheduler.py](master/services/scheduler.py)).
 
 ---
 
@@ -25,10 +31,14 @@ The local Docker Compose stack runs the full end-to-end pipeline.
 
 ### What's included
 
-- NGINX as the public entry point on port `8008` (least-conn LB across masters)
+- NGINX as the public entry point on port `8008`
+  - `/` routes to masters directly (least-conn LB)
+  - `/rag/` routes to the RAG service (and injects `X-Master-Id`)
 - 2 master nodes: `master1`, `master2` (FastAPI on internal port `7000`; mapped to host `7001`/`7002`)
+- Qdrant vector DB: `qdrant` (port `6333`, persisted on a named volume)
+- RAG service: `rag` (internal port `8090`, normally accessed through NGINX)
 - 2 CPU workers: `cpu_worker_1_1`, `cpu_worker_2_1` (one per master, port `9001` internal)
-- 2 Groq workers: `groq_worker_1_3`, `groq_worker_2_3` (one per master, port `8000` internal)
+- Groq workers (FastAPI shims): `groq_worker_1_2`, `groq_worker_1_3`, `groq_worker_2_2`, `groq_worker_2_3` (port `8000` internal)
 
 ### Files
 
@@ -43,12 +53,23 @@ The local Docker Compose stack runs the full end-to-end pipeline.
 
 ### Required environment variables
 
-Copy `.env.example` to `.env` and fill values:
+Create a `.env` file (not committed) and fill values referenced by `docker-compose.yml`:
 
 ```
-GROQ_API_KEY=          # required for groq workers — see https://console.groq.com/keys
-WORKER_API_KEY=        # optional — header used on master ↔ worker calls
+GROQ_API_KEY_1=          # required for groq workers — see https://console.groq.com/keys
+GROQ_API_KEY_2=
+GROQ_API_KEY_4=
+GROQ_API_KEY_5=
+
+# Optional: header used on master ↔ worker calls
+WORKER_API_KEY=
 ```
+
+RAG + Qdrant are configured via compose env vars (can be overridden):
+
+- `QDRANT_HOST` / `QDRANT_PORT` / `QDRANT_COLLECTION`
+- `EMBEDDING_MODEL` (default `all-MiniLM-L6-v2`)
+- `MASTER_URLS` (JSON mapping allow-list of masters the RAG service may forward to)
 
 ### How to run
 
@@ -57,7 +78,21 @@ docker compose up --build -d
 docker compose ps -a
 ```
 
-Expected `Up`: `distributed-nginx`, `master1`, `master2`, `cpu_worker_1_1`, `cpu_worker_2_1`, `groq_worker_1_3`, `groq_worker_2_3`.
+Build tips (much faster iteration):
+
+- If you only changed one service, rebuild just that service:
+
+```powershell
+docker compose up -d --build rag
+```
+
+- Build caching: the Dockerfiles use BuildKit cache mounts for pip downloads. If caching seems disabled, set:
+
+```powershell
+$env:DOCKER_BUILDKIT=1
+```
+
+Expected `Up`: `distributed-nginx`, `qdrant`, `rag`, `master1`, `master2`, `cpu_worker_1_1`, `cpu_worker_2_1`, and the enabled Groq workers.
 
 ### How to verify
 
@@ -66,6 +101,20 @@ Expected `Up`: `distributed-nginx`, `master1`, `master2`, `cpu_worker_1_1`, `cpu
 ```powershell
 curl http://localhost:8008/nginx/health
 ```
+
+**1b. RAG health (through NGINX):**
+
+```powershell
+curl http://localhost:8008/rag/health
+```
+
+**1c. RAG Swagger (through NGINX):**
+
+Open:
+
+- http://localhost:8008/rag/docs
+
+In Swagger you will see RAG endpoints like `POST /documents/pdf` and `POST /generate`.
 
 **2. Each master sees its 2 workers:**
 
@@ -88,6 +137,34 @@ curl -X POST http://localhost:8008/generate -H "Content-Type: application/json" 
 
 Response includes `master_id` and `worker_id` so you can see which path served the request.
 
+**4. RAG end-to-end via NGINX:**
+
+```powershell
+curl -X POST http://localhost:8008/rag/generate -H "Content-Type: application/json" -d '{"prompt":"Explain consistent hashing.","max_new_tokens":64,"top_k":3,"book_id":2}'
+```
+
+**4b. Ingest a PDF into RAG (stores chunks in Qdrant):**
+
+```powershell
+curl -X POST http://localhost:8008/rag/documents/pdf `
+  -F "file=@./docs/my.pdf" `
+  -F "book_id=2" `
+  -F "chunk_size=1200" `
+  -F "chunk_overlap=200" `
+  -F "min_chunk_chars=50"
+```
+
+Notes:
+
+- For large PDFs, you may need to increase `client_max_body_size` in `nginx/nginx.conf`.
+- The payload stored per chunk includes `book_id`, `page_number`, `chunk_index`, `text`, `filename`.
+
+Notes:
+
+- `top_k` controls how many chunks are retrieved.
+- `book_id` is used as a Qdrant payload filter (`{"book_id": <id>}`) if present.
+- NGINX injects `X-Master-Id`, so the request is pinned to a specific master.
+
 ### Test scripts
 
 ```powershell
@@ -104,7 +181,7 @@ Expected distribution by worker:
 
 | Run | Workers you should see |
 |---|---|
-| `--large-ratio 1` | `groq_worker_1_3` + `groq_worker_2_3` |
+| `--large-ratio 1` | one or more of `groq_worker_1_2`, `groq_worker_1_3`, `groq_worker_2_2`, `groq_worker_2_3` |
 | `--large-ratio 0` | `worker_1_1` + `worker_2_1` |
 | `--large-ratio 0.3` | mix of all four |
 
@@ -127,10 +204,14 @@ While master1 is down, every successful response should come from a `_2_*` worke
 | nginx | `8008` | 8008 |
 | master1 | `7001` | 7000 |
 | master2 | `7002` | 7000 |
+| rag | `—` (via nginx) | 8090 |
+| qdrant | `6333` | 6333 |
 | cpu_worker_1_1 | `9001` | 9001 |
-| cpu_worker_2_1 | `9003` | 9001 |
-| groq_worker_1_3 | `8000` | 8000 |
-| groq_worker_2_3 | `8001` | 8000 |
+| cpu_worker_2_1 | `9002` | 9001 |
+| groq_worker_1_2 | `8000` | 8000 |
+| groq_worker_1_3 | `8002` | 8000 |
+| groq_worker_2_2 | `8001` | 8000 |
+| groq_worker_2_3 | `8004` | 8000 |
 
 ---
 
@@ -155,7 +236,7 @@ Each Groq worker is a thin FastAPI service that forwards `/generate` to Groq's `
 ### Architecture
 
 ```
-master ──▶ http://groq_worker_X_3:8000/generate ──▶ Groq cloud (llama-3.1-8b-instant)
+master ──▶ http://groq_worker_*:8000/generate ──▶ Groq cloud (llama-3.1-8b-instant)
 ```
 
 ### Heartbeats
@@ -196,7 +277,7 @@ The master's registry treats workers stale after `WORKER_STALE_SEC` (default 15 
 
 | Variable | Purpose |
 |---|---|
-| `GROQ_API_KEY` | Authenticates against Groq cloud |
+| `GROQ_API_KEY_*` | Authenticates against Groq cloud |
 | `WORKER_ID` | Heartbeat identity |
 | `SELF_URL` | URL the master will call back on |
 | `MASTER_URL` | Heartbeat target |
@@ -236,11 +317,30 @@ The master accepts the unified `prompt` field on input. On output it normalizes 
 
 ---
 
+## RAG API Contract
+
+The RAG service exposes a master-compatible API, but with retrieval controls.
+
+### NGINX → RAG
+
+```
+POST /rag/generate
+Request:  {"prompt":"...","max_new_tokens":64,"top_k":3,"book_id":2}
+Response: (same as master /generate)
+```
+
+`master_id` selection:
+
+- Preferred: NGINX injects `X-Master-Id` and the RAG service forwards only to that master.
+- Optional: you can also pass `master_id` in the JSON body; it must exist in the RAG allow-list (`MASTER_URLS`).
+
+---
+
 ## Notes
 
 - `nginx/nginx.conf` is mounted into the container — config changes don't require an image rebuild.
 - Master and worker images do require rebuilds: `docker compose up --build`.
-- `.env` must never be committed. `.env.example` documents required variables.
+- `.env` must never be committed.
 - The Kaggle integration documented in `workers/KAGGLE_SETUP.md` is **retired**. GPU traffic now goes through Groq cloud instead of Tesla T4s on Kaggle.
 
 ---
@@ -254,5 +354,6 @@ The master accepts the unified `prompt` field on input. On output it normalizes 
 - ✅ CPU workers (Qwen 2.5 0.5B, local) + Groq workers (cloud LLM)
 - ✅ End-to-end test scripts (`simulate_nginx_lb.py`, `simulate_worker_scheduling.py`, `smoke_worker_node.py`)
 - ⏳ Real-time in-flight tracking at the master (so CPU saturation fallback fires under sub-heartbeat bursts)
-- ⏳ RAG integration
+- ✅ RAG service + Qdrant wired behind NGINX (`/rag/generate`)
+- ⏳ Data ingestion pipeline for Qdrant (chunking + upsert) depending on your dataset
 - ⏳ Multi-failure fault-tolerance demo

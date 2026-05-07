@@ -44,7 +44,7 @@ async def root(
 
 
 @router.get("/health")
-async def health() -> dict[str, Any]:
+async def localhealth() -> dict[str, Any]:
     return {"status": "ok", **_base_payload()}
 
 
