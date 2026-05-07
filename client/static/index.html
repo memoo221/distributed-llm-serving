@@ -228,6 +228,17 @@
       </div>
     </div>
 
+    <div class="panel" style="margin-bottom: 16px;">
+      <h2>Live Workers
+        <span style="float:right; margin-top:-4px; color: var(--muted); font-weight: 400; font-size: 11px; text-transform: none; letter-spacing: 0;">
+          (from master registries · auto-refresh)
+        </span>
+      </h2>
+      <div id="liveWorkers">
+        <div class="empty">Loading…</div>
+      </div>
+    </div>
+
     <div class="panel">
       <h2>Run Load Test</h2>
       <label for="targetUrl">Target URL</label>
@@ -429,7 +440,63 @@ $("services").addEventListener("click", (ev) => {
   serviceAction(btn.dataset.name, btn.dataset.action);
 });
 
-$("refreshServices").addEventListener("click", loadServices);
+$("refreshServices").addEventListener("click", () => {
+  loadServices();
+  loadLiveWorkers();
+});
+
+async function loadLiveWorkers() {
+  const elem = $("liveWorkers");
+  try {
+    const { masters } = await api("/api/workers");
+    if (!masters.length) {
+      elem.innerHTML = '<div class="empty">no masters configured</div>';
+      return;
+    }
+    const blocks = masters.map((m) => {
+      if (!m.reachable) {
+        return `<div class="breakdown-block" style="margin-bottom:8px;">
+          <h3>${m.master_id} · <span style="color: var(--err);">unreachable</span></h3>
+          <div class="empty" style="text-align:left; padding:4px 0;">${m.error || "no response"}</div>
+        </div>`;
+      }
+      if (!m.workers.length) {
+        return `<div class="breakdown-block" style="margin-bottom:8px;">
+          <h3>${m.master_id} · <span style="color: var(--muted);">no workers</span></h3>
+          <div class="empty" style="text-align:left; padding:4px 0;">no workers heartbeating yet</div>
+        </div>`;
+      }
+      const rows = m.workers.map((w) => {
+        const stale = w.last_seen_sec_ago > 15;
+        const dot = stale ? "<span class=\"badge stopped\">stale</span>"
+          : w.in_cooldown ? "<span class=\"badge restarting\">cooldown</span>"
+          : "<span class=\"badge running\">live</span>";
+        const dev = w.device_type === "gpu" ? "<span style=\"color: var(--accent); font-weight:600;\">gpu</span>" : "cpu";
+        return `<tr>
+          <td>${w.worker_id}</td>
+          <td>${dev}</td>
+          <td>${dot}</td>
+          <td>${w.last_seen_sec_ago}s</td>
+          <td>${w.active_requests}/${w.slots}</td>
+        </tr>`;
+      }).join("");
+      return `<div class="breakdown-block" style="margin-bottom:8px;">
+        <h3>${m.master_id}</h3>
+        <table style="margin-top:4px;">
+          <thead><tr><th>worker</th><th>type</th><th>state</th><th>last seen</th><th>load</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+    });
+    elem.innerHTML = blocks.join("");
+  } catch (e) {
+    elem.innerHTML = `<div class="empty">error: ${e.message}</div>`;
+  }
+}
+
+// Auto-refresh live workers every 3s. Cheap (one parallel fetch per master).
+setInterval(loadLiveWorkers, 3000);
+loadLiveWorkers();
 
 $("startAllServices").addEventListener("click", async () => {
   const btn = $("startAllServices");

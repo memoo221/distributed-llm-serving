@@ -10,14 +10,26 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import asyncio
 import csv
 import io
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from client import docker_control, runner
+
+
+# Masters the UI queries directly for live worker registry data. This is what
+# surfaces remote workers (e.g. Thunder GPU instances) that aren't part of
+# docker-compose — they're invisible to /api/services but show up here as
+# soon as they heartbeat to a master.
+MASTER_URLS: list[tuple[str, str]] = [
+    ("master1", "http://localhost:7001"),
+    ("master2", "http://localhost:7002"),
+]
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -67,6 +79,33 @@ async def post_start_all() -> dict:
         return await docker_control.start_all()
     except docker_control.DockerError as exc:
         raise HTTPException(500, str(exc))
+
+
+@app.get("/api/workers")
+async def get_workers() -> dict:
+    """Live workers from each master's registry.
+
+    Surfaces anything that's heartbeating to a master, including non-docker
+    workers (e.g. Thunder GPUs). One query per master, in parallel; if a
+    master is unreachable we still return whatever the others gave us.
+    """
+    async def _fetch(master_id: str, base_url: str) -> dict:
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as http:
+                resp = await http.get(f"{base_url}/scheduler/workers")
+                if resp.status_code != 200:
+                    return {"master_id": master_id, "reachable": False, "error": f"HTTP {resp.status_code}", "workers": []}
+                data = resp.json()
+                return {
+                    "master_id": master_id,
+                    "reachable": True,
+                    "workers": data.get("workers", []),
+                }
+        except Exception as exc:
+            return {"master_id": master_id, "reachable": False, "error": f"{type(exc).__name__}: {exc}", "workers": []}
+
+    masters = await asyncio.gather(*(_fetch(mid, url) for mid, url in MASTER_URLS))
+    return {"masters": masters}
 
 
 class RunRequest(BaseModel):
