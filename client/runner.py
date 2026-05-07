@@ -26,6 +26,9 @@ class RequestResult:
     worker_id: str | None = None
     master_id: str | None = None
     error: str | None = None
+    # Generated text from the worker. Can be long — UI truncates for display
+    # but the full string is kept in memory and exported via CSV.
+    response: str | None = None
 
 
 @dataclass
@@ -93,6 +96,7 @@ class RunState:
                     "worker_id": r.worker_id,
                     "master_id": r.master_id,
                     "error": r.error,
+                    "response": r.response,
                 }
                 for r in self.results[-50:]
             ],
@@ -145,6 +149,7 @@ async def _fire_one(
                 latency_sec=latency,
                 worker_id=data.get("worker_id"),
                 master_id=data.get("master_id"),
+                response=data.get("response"),
             )
         body = resp.text[:200]
         return RequestResult(

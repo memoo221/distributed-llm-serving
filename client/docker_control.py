@@ -144,6 +144,18 @@ async def start_all() -> dict[str, Any]:
     return {"action": "start_all", "ok": True}
 
 
+async def stop_all() -> dict[str, Any]:
+    """Stop every service defined in docker-compose.yml.
+
+    `docker compose stop` with no service argument stops all services. Doesn't
+    remove containers — start-all brings them back fast.
+    """
+    rc, stdout, stderr = await _run("docker", "compose", "stop", timeout=120.0)
+    if rc != 0:
+        raise DockerError(f"failed to stop all: {stderr.strip() or stdout.strip()}")
+    return {"action": "stop_all", "ok": True}
+
+
 async def docker_available() -> bool:
     try:
         rc, _, _ = await _run("docker", "compose", "version", timeout=10.0)

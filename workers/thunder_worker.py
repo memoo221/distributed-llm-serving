@@ -30,7 +30,7 @@ from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
-MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-0.5B-Instruct")
+MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
 WORKER_ID = os.getenv("WORKER_ID", "thunder_worker_1")
 SELF_URL = os.getenv("SELF_URL", "http://localhost:8000")
 MASTER_URL = os.getenv("MASTER_URL", "")

@@ -81,6 +81,14 @@ async def post_start_all() -> dict:
         raise HTTPException(500, str(exc))
 
 
+@app.post("/api/services/stop-all")
+async def post_stop_all() -> dict:
+    try:
+        return await docker_control.stop_all()
+    except docker_control.DockerError as exc:
+        raise HTTPException(500, str(exc))
+
+
 @app.get("/api/workers")
 async def get_workers() -> dict:
     """Live workers from each master's registry.
@@ -153,6 +161,7 @@ async def get_run_results(run_id: str) -> dict:
                 "worker_id": r.worker_id,
                 "master_id": r.master_id,
                 "error": r.error,
+                "response": r.response,
             }
             for r in state.results
         ],
@@ -166,7 +175,7 @@ async def get_run_csv(run_id: str) -> Response:
         raise HTTPException(404, "run not found")
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["index", "status_code", "latency_sec", "worker_id", "master_id", "error"])
+    writer.writerow(["index", "status_code", "latency_sec", "worker_id", "master_id", "error", "response"])
     for r in state.results:
         writer.writerow([
             r.index,
@@ -175,6 +184,7 @@ async def get_run_csv(run_id: str) -> Response:
             r.worker_id or "",
             r.master_id or "",
             (r.error or "").replace("\n", " ").replace("\r", " "),
+            (r.response or "").replace("\n", " ").replace("\r", " "),
         ])
     return Response(
         content=buf.getvalue(),

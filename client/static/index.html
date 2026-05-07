@@ -174,6 +174,19 @@
   td.status-200 { color: var(--ok); }
   td.status-bad { color: var(--err); }
 
+  tr.log-row { cursor: pointer; }
+  td.log-cell {
+    max-width: 460px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  tr.log-row.expanded td.log-cell {
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-width: 460px;
+  }
+
   .breakdown {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -220,6 +233,7 @@
       <h2>Nodes
         <span style="float:right; margin-top:-4px; display:inline-flex; gap:6px;">
           <button id="startAllServices" class="small">Start all</button>
+          <button id="stopAllServices" class="danger small">Stop all</button>
           <button id="refreshServices" class="ghost small">Refresh</button>
         </span>
       </h2>
@@ -347,13 +361,16 @@
               <th>Latency (s)</th>
               <th>Worker</th>
               <th>Master</th>
-              <th>Error</th>
+              <th>Response / Error</th>
             </tr>
           </thead>
           <tbody id="recentBody">
             <tr><td colspan="6" class="empty">no requests yet</td></tr>
           </tbody>
         </table>
+      </div>
+      <div style="margin-top: 6px; color: var(--muted); font-size: 11px;">
+        Click any row to expand the full response.
       </div>
     </div>
   </div>
@@ -498,6 +515,23 @@ async function loadLiveWorkers() {
 setInterval(loadLiveWorkers, 3000);
 loadLiveWorkers();
 
+// Expand/collapse a log row on click. Uses event delegation so it survives
+// the polling re-renders.
+$("recentBody").addEventListener("click", (ev) => {
+  const row = ev.target.closest("tr.log-row");
+  if (!row) return;
+  const cell = row.querySelector("td.log-cell");
+  if (!cell) return;
+  if (row.classList.toggle("expanded")) {
+    cell.textContent = row.dataset.full || cell.textContent;
+  } else {
+    // Re-truncate
+    const full = row.dataset.full || "";
+    const shrunk = full.replace(/\s+/g, " ").slice(0, 90);
+    cell.textContent = shrunk + (full.length > 90 ? "…" : "");
+  }
+});
+
 $("startAllServices").addEventListener("click", async () => {
   const btn = $("startAllServices");
   const prev = btn.textContent;
@@ -510,6 +544,25 @@ $("startAllServices").addEventListener("click", async () => {
     loadServices();
   } catch (e) {
     toast(`start all failed: ${e.message}`, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
+  }
+});
+
+$("stopAllServices").addEventListener("click", async () => {
+  if (!confirm("Stop ALL services defined in docker-compose.yml?")) return;
+  const btn = $("stopAllServices");
+  const prev = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Stopping…";
+  try {
+    toast("stopping all services…");
+    await api("/api/services/stop-all", { method: "POST" });
+    toast("all services stopped");
+    loadServices();
+  } catch (e) {
+    toast(`stop all failed: ${e.message}`, true);
   } finally {
     btn.disabled = false;
     btn.textContent = prev;
@@ -561,6 +614,13 @@ function renderSnapshot(s) {
   }
 }
 
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 function renderLogRows(rows) {
   const body = $("recentBody");
   if (!rows.length) {
@@ -572,14 +632,18 @@ function renderLogRows(rows) {
     .reverse()
     .map((r) => {
       const okClass = r.status_code === 200 ? "status-200" : "status-bad";
-      const err = r.error ? r.error.replace(/</g, "&lt;").slice(0, 80) : "";
-      return `<tr>
+      // Show response on success, error on failure. One column, two purposes.
+      const text = r.status_code === 200 ? (r.response || "") : (r.error || "");
+      const truncated = escapeHtml(text.replace(/\s+/g, " ")).slice(0, 90);
+      const more = text.length > 90 ? "…" : "";
+      const fullEscaped = escapeHtml(text);
+      return `<tr class="log-row" data-full="${fullEscaped}">
         <td>${r.index}</td>
         <td class="${okClass}">${r.status_code ?? "ERR"}</td>
         <td>${r.latency_sec}</td>
         <td>${r.worker_id ?? "—"}</td>
         <td>${r.master_id ?? "—"}</td>
-        <td>${err}</td>
+        <td class="log-cell">${truncated}${more}</td>
       </tr>`;
     })
     .join("");
