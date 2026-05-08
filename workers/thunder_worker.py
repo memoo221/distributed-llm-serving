@@ -11,9 +11,15 @@ just this file to Thunder if you don't want to ship the whole repo.
 Run on Thunder:
     pip install -r thunder_requirements.txt
     MASTER_URL=https://<your-tunnel>.trycloudflare.com \
-    WORKER_ID=thunder_worker_1 \
-    SELF_URL=http://<thunder-public-ip>:8000 \
+    SELF_URL=https://<uuid>-<port>.thundercompute.net \
+    WORKER_ID=thunder_a_gpu0 \
+    WORKER_DEVICE=cuda:0 \
     uvicorn thunder_worker:app --host 0.0.0.0 --port 8000
+
+WORKER_DEVICE pins the worker to a specific GPU on multi-GPU instances.
+Required on Thunder Compute because their CUDA runtime intercepts
+CUDA_VISIBLE_DEVICES and routes everything to the first physical GPU.
+Use cuda:0 / cuda:1 / etc. to select; omit to default to "cuda".
 """
 from __future__ import annotations
 
@@ -37,10 +43,15 @@ MASTER_URL = os.getenv("MASTER_URL", "")
 HEARTBEAT_SEC = float(os.getenv("HEARTBEAT_INTERVAL", "5"))
 WORKER_API_KEY = os.getenv("WORKER_API_KEY", "")
 
+TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
+TOP_P = float(os.getenv("TOP_P", "0.9"))
+
 # Filled in lifespan; None until the model finishes loading.
 _tokenizer = None
 _model = None
-_device = "cuda" if torch.cuda.is_available() else "cpu"
+# Allow WORKER_DEVICE to override (e.g. "cuda:0" or "cuda:1") for multi-GPU
+# instances where CUDA_VISIBLE_DEVICES is intercepted by the host runtime.
+_device = os.getenv("WORKER_DEVICE") or ("cuda" if torch.cuda.is_available() else "cpu")
 
 # Heartbeat counter. Inference runs in a thread (asyncio.to_thread), so this
 # is touched from multiple threads — guard with a Lock. The asyncio path
@@ -95,14 +106,15 @@ async def lifespan(app: FastAPI):
     print(f"[{WORKER_ID}] loading {MODEL_NAME} on {_device}...")
     t0 = time.time()
     _tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    dtype = torch.float16 if _device == "cuda" else torch.float32
+    dtype = torch.float16 if _device.startswith("cuda") else torch.float32
     _model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, torch_dtype=dtype)
     _model = _model.to(_device)
     _model.eval()
-    if _device == "cuda":
-        free, total = torch.cuda.mem_get_info()
+    if _device.startswith("cuda"):
+        device_id = int(_device.split(":", 1)[1]) if ":" in _device else None
+        free, total = torch.cuda.mem_get_info(device_id)
         used_mb = (total - free) / (1024 * 1024)
-        print(f"[{WORKER_ID}] loaded in {time.time()-t0:.1f}s, vram_used={used_mb:.0f}MB")
+        print(f"[{WORKER_ID}] loaded in {time.time()-t0:.1f}s, device={_device}, vram_used={used_mb:.0f}MB")
     else:
         print(f"[{WORKER_ID}] loaded in {time.time()-t0:.1f}s (cpu fallback)")
     print(f"[{WORKER_ID}] master={MASTER_URL or 'none'}, self_url={SELF_URL}")
@@ -157,7 +169,10 @@ async def generate(req: Request):
 def _run_inference(prompt: str, max_new_tokens: int) -> str:
     # Apply the model's chat template when available so instruct-tuned models
     # behave correctly. Falls back to raw prompt for base models.
-    messages = [{"role": "user", "content": prompt}]
+    messages=[
+                {"role": "system", "content": "You are a helpful assistant. Answer clearly and concisely in English."},
+                {"role": "user", "content": prompt},
+            ]
     if hasattr(_tokenizer, "apply_chat_template") and _tokenizer.chat_template:
         text = _tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
@@ -170,7 +185,9 @@ def _run_inference(prompt: str, max_new_tokens: int) -> str:
         outputs = _model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
-            do_sample=False,
+            do_sample=True,
+            temperature=TEMPERATURE,
+            top_p=TOP_P,
             pad_token_id=_tokenizer.eos_token_id,
         )
     new_tokens = outputs[0][inputs.input_ids.shape[1]:]
