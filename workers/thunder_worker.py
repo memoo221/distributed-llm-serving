@@ -28,6 +28,7 @@ import os
 import threading
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 
 import httpx
 import torch
@@ -36,15 +37,26 @@ from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
-MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
-WORKER_ID = os.getenv("WORKER_ID", "thunder_worker_1")
-SELF_URL = os.getenv("SELF_URL", "http://localhost:8000")
+# Use `or default` instead of os.getenv(key, default) — the latter returns ""
+# when the var is set-but-empty, which has bitten us when launch_workers.sh
+# accidentally let MODEL_NAME='' through. `or` falls back to default for
+# both unset AND empty values.
+MODEL_NAME = os.getenv("MODEL_NAME") or "meta-llama/Llama-3.1-8B-Instruct"
+WORKER_ID = os.getenv("WORKER_ID") or "thunder_worker_1"
+SELF_URL = os.getenv("SELF_URL") or "http://localhost:8000"
 MASTER_URL = os.getenv("MASTER_URL", "")
-HEARTBEAT_SEC = float(os.getenv("HEARTBEAT_INTERVAL", "5"))
+HEARTBEAT_SEC = float(os.getenv("HEARTBEAT_INTERVAL") or "5")
 WORKER_API_KEY = os.getenv("WORKER_API_KEY", "")
 
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
 TOP_P = float(os.getenv("TOP_P", "0.9"))
+
+# Continuous-batching knobs. The batcher coalesces concurrent /generate calls
+# into a single model.generate() so multiple prompts share each forward pass.
+# BATCH_SIZE caps how many requests run together; BATCH_WAIT_MS is how long
+# to wait for more requests to arrive after the first one before flushing.
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "8"))
+BATCH_WAIT_MS = int(os.getenv("BATCH_WAIT_MS", "30"))
 
 # Filled in lifespan; None until the model finishes loading.
 _tokenizer = None
@@ -58,6 +70,17 @@ _device = os.getenv("WORKER_DEVICE") or ("cuda" if torch.cuda.is_available() els
 # could use a plain int, but consistency is cheaper than auditing later.
 _active = 0
 _active_lock = threading.Lock()
+
+
+@dataclass
+class _PendingRequest:
+    prompt: str
+    max_new_tokens: int
+    future: asyncio.Future = field(default=None)
+
+
+# Set in lifespan once the asyncio loop is running.
+_request_queue: asyncio.Queue | None = None
 
 
 def _inc() -> None:
@@ -91,6 +114,7 @@ async def heartbeat_loop() -> None:
                 "device_type": "gpu",
                 "active_requests": _snapshot_active(),
                 "queue_depth": 0,
+                "slots": BATCH_SIZE,
                 "timestamp": time.time(),
             }
             try:
@@ -102,10 +126,15 @@ async def heartbeat_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _tokenizer, _model
+    global _tokenizer, _model, _request_queue
     print(f"[{WORKER_ID}] loading {MODEL_NAME} on {_device}...")
     t0 = time.time()
     _tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    # Causal LMs need left-padding so the generated tokens come out at the
+    # right side of every sequence in a batch.
+    _tokenizer.padding_side = "left"
+    if _tokenizer.pad_token_id is None:
+        _tokenizer.pad_token = _tokenizer.eos_token
     dtype = torch.float16 if _device.startswith("cuda") else torch.float32
     _model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, torch_dtype=dtype)
     _model = _model.to(_device)
@@ -118,11 +147,15 @@ async def lifespan(app: FastAPI):
     else:
         print(f"[{WORKER_ID}] loaded in {time.time()-t0:.1f}s (cpu fallback)")
     print(f"[{WORKER_ID}] master={MASTER_URL or 'none'}, self_url={SELF_URL}")
-    task = asyncio.create_task(heartbeat_loop())
+    print(f"[{WORKER_ID}] batching enabled: BATCH_SIZE={BATCH_SIZE}, BATCH_WAIT_MS={BATCH_WAIT_MS}")
+    _request_queue = asyncio.Queue()
+    hb_task = asyncio.create_task(heartbeat_loop())
+    batch_task = asyncio.create_task(_batcher_loop())
     try:
         yield
     finally:
-        task.cancel()
+        hb_task.cancel()
+        batch_task.cancel()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -146,49 +179,91 @@ async def health():
 
 @app.post("/generate")
 async def generate(req: Request):
-    if _model is None:
+    if _model is None or _request_queue is None:
         raise HTTPException(status_code=503, detail="model not loaded yet")
+    pending = _PendingRequest(
+        prompt=req.prompt,
+        max_new_tokens=req.max_new_tokens,
+        future=asyncio.get_running_loop().create_future(),
+    )
     _inc()
     try:
-        # transformers.generate is blocking; offload to a thread so the event
-        # loop stays free for heartbeats and incoming HTTP. Multiple concurrent
-        # /generate calls will serialize on the GPU (no batching), which is
-        # fine for a single-stream worker — the master schedules around it.
-        text = await asyncio.to_thread(_run_inference, req.prompt, req.max_new_tokens)
+        await _request_queue.put(pending)
+        text = await pending.future
         return {"response": text}
     except torch.cuda.OutOfMemoryError as e:
-        # Free the cached blocks so the next request has a chance to fit.
         torch.cuda.empty_cache()
         raise HTTPException(status_code=503, detail=f"cuda oom: {e}")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"{type(e).__name__}: {e}")
     finally:
         _dec()
 
 
-def _run_inference(prompt: str, max_new_tokens: int) -> str:
-    # Apply the model's chat template when available so instruct-tuned models
-    # behave correctly. Falls back to raw prompt for base models.
-    messages=[
-                {"role": "system", "content": "You are a helpful assistant. Answer clearly and concisely in English."},
-                {"role": "user", "content": prompt},
-            ]
-    if hasattr(_tokenizer, "apply_chat_template") and _tokenizer.chat_template:
-        text = _tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-    else:
-        text = prompt
+async def _batcher_loop() -> None:
+    # Single consumer of _request_queue. Coalesces concurrent requests into
+    # one batched model.generate() per iteration so multiple prompts share
+    # the same forward passes on the GPU.
+    assert _request_queue is not None
+    wait_s = BATCH_WAIT_MS / 1000.0
+    while True:
+        first = await _request_queue.get()
+        batch: list[_PendingRequest] = [first]
+        deadline = time.monotonic() + wait_s
+        while len(batch) < BATCH_SIZE:
+            timeout = deadline - time.monotonic()
+            if timeout <= 0:
+                break
+            try:
+                nxt = await asyncio.wait_for(_request_queue.get(), timeout=timeout)
+            except asyncio.TimeoutError:
+                break
+            batch.append(nxt)
 
-    inputs = _tokenizer(text, return_tensors="pt").to(_device)
+        try:
+            results = await asyncio.to_thread(_run_batch, batch)
+            for req, text in zip(batch, results):
+                if not req.future.done():
+                    req.future.set_result(text)
+        except Exception as e:
+            for req in batch:
+                if not req.future.done():
+                    req.future.set_exception(e)
+
+
+def _format_prompt(prompt: str) -> str:
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant. Answer clearly and concisely in English."},
+        {"role": "user", "content": prompt},
+    ]
+    if hasattr(_tokenizer, "apply_chat_template") and _tokenizer.chat_template:
+        return _tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    return prompt
+
+
+def _run_batch(batch: list[_PendingRequest]) -> list[str]:
+    prompts = [_format_prompt(b.prompt) for b in batch]
+    # All sequences in a batch share the same generation length budget — use
+    # the largest requested so no single request gets truncated. Per-sequence
+    # EOS still stops earlier finishers naturally inside generate().
+    max_new = max(b.max_new_tokens for b in batch)
+
+    inputs = _tokenizer(prompts, return_tensors="pt", padding=True).to(_device)
     with torch.no_grad():
         outputs = _model.generate(
             **inputs,
-            max_new_tokens=max_new_tokens,
+            max_new_tokens=max_new,
             do_sample=True,
             temperature=TEMPERATURE,
             top_p=TOP_P,
-            pad_token_id=_tokenizer.eos_token_id,
+            pad_token_id=_tokenizer.pad_token_id,
         )
-    new_tokens = outputs[0][inputs.input_ids.shape[1]:]
-    return _tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+    input_len = inputs.input_ids.shape[1]
+    results: list[str] = []
+    for i in range(len(batch)):
+        new_tokens = outputs[i][input_len:]
+        text = _tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        results.append(text)
+    return results
