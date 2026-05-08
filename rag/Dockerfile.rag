@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1.6
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements-rag.txt ./requirements-rag.txt
+
+# Keep the RAG image lightweight: sentence-transformers depends on torch.
+# If we don't install torch explicitly, pip may pull a CUDA-enabled build
+# on Linux, which is very large.
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+	pip install --upgrade pip setuptools wheel \
+	&& pip install torch --index-url https://download.pytorch.org/whl/cpu \
+	&& pip install -r requirements-rag.txt
+
+COPY rag ./rag
+
+CMD ["uvicorn", "rag.rag_app:app", "--host", "0.0.0.0", "--port", "8090"]
