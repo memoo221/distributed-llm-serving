@@ -95,10 +95,17 @@ def _pick_master_url(master_id: str | None, x_master_id: str | None) -> tuple[st
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    connect_timeout = float(os.getenv("RAG_CONNECT_TIMEOUT_SEC", "2"))
+    connect_timeout = float(os.getenv("RAG_CONNECT_TIMEOUT_SEC", "5"))
     read_timeout = float(os.getenv("RAG_READ_TIMEOUT_SEC", "800"))
     write_timeout = float(os.getenv("RAG_WRITE_TIMEOUT_SEC", "60"))
-    pool_timeout = float(os.getenv("RAG_POOL_TIMEOUT_SEC", "2"))
+    pool_timeout = float(os.getenv("RAG_POOL_TIMEOUT_SEC", "30"))
+
+    max_connections = int(os.getenv("RAG_MAX_CONNECTIONS", "200"))
+    max_keepalive = int(os.getenv("RAG_MAX_KEEPALIVE_CONNECTIONS", "50"))
+    if max_connections < 1:
+        max_connections = 200
+    if max_keepalive < 0:
+        max_keepalive = 50
 
     app.state.http = httpx.AsyncClient(
         timeout=httpx.Timeout(
@@ -106,7 +113,11 @@ async def lifespan(app: FastAPI):
             read=read_timeout,
             write=write_timeout,
             pool=pool_timeout,
-        )
+        ),
+        limits=httpx.Limits(
+            max_connections=max_connections,
+            max_keepalive_connections=min(max_keepalive, max_connections),
+        ),
     )
 
     # Warm up heavy components at startup for throughput.
@@ -138,10 +149,11 @@ async def generate(
     x_request_id: str | None = Header(default=None, alias="X-Request-Id"),
 ) -> dict[str, Any]:
     # 1) Enhance prompt via retrieval
-    enhanced = _prompt_builder().build_prompt(
-        question=payload.prompt,
-        book_id=payload.book_id,
-        top_k=payload.top_k,
+    enhanced = await run_in_threadpool(
+        _prompt_builder().build_prompt,
+        payload.prompt,
+        payload.book_id,
+        payload.top_k,
     )
 
     # 2) Decide where to forward (allow-list)
