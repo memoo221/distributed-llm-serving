@@ -412,6 +412,18 @@ let pollHandle = null;
 // Logs panel: when true, renders the full result list from /results;
 // when false (default), renders the live tail (last 50) from the snapshot.
 let showAllLogs = false;
+// Local elapsed-time ticker. The server's elapsed_sec only updates when we
+// poll, so under load it looks frozen between ticks. We track the run's
+// start wall-clock time client-side and recompute elapsed every 200ms.
+// Once the run finishes we freeze at the server-reported finished elapsed.
+let runStartMs = null;
+let runFrozenElapsedSec = null;
+let elapsedTickHandle = null;
+// Skip repainting the snapshot when nothing changed. Counter-based:
+// if completed didn't move since last paint, the only thing that would
+// change is elapsed (handled by the local ticker) — so we can skip the
+// expensive renderKV / table repaint.
+let lastPaintedCompleted = -1;
 
 function toast(msg, isErr = false) {
   const t = $("toast");
@@ -616,12 +628,26 @@ function renderKV(elem, obj) {
 }
 
 function renderSnapshot(s) {
+  // If finished, freeze the server-reported elapsed and stop the local ticker.
+  if (s.finished || s.cancelled) {
+    runFrozenElapsedSec = s.elapsed_sec ?? 0;
+    if (elapsedTickHandle) { clearInterval(elapsedTickHandle); elapsedTickHandle = null; }
+    $("statElapsed").textContent = `${runFrozenElapsedSec}s`;
+  }
+
+  // Skip the expensive bits if nothing changed since last paint. The local
+  // elapsed ticker still updates the elapsed stat, so the UI doesn't look
+  // stuck even when we skip here.
+  if (s.completed === lastPaintedCompleted && !(s.finished || s.cancelled)) {
+    return;
+  }
+  lastPaintedCompleted = s.completed;
+
   $("runIdLabel").textContent = `· ${s.run_id} · ${s.target_url}`;
   $("statCompleted").textContent = `${s.completed} / ${s.total_requests}`;
   $("statSucceeded").textContent = fmtNum(s.succeeded);
   $("statFailed").textContent = fmtNum(s.failed);
   $("statThroughput").textContent = `${s.throughput_rps ?? 0} req/s`;
-  $("statElapsed").textContent = `${s.elapsed_sec ?? 0}s`;
   $("statP50").textContent = s.p50_sec !== null ? `${s.p50_sec}s` : "—";
   $("statP95").textContent = s.p95_sec !== null ? `${s.p95_sec}s` : "—";
   $("statP99").textContent = s.p99_sec !== null ? `${s.p99_sec}s` : "—";
@@ -639,6 +665,12 @@ function renderSnapshot(s) {
   if (!showAllLogs) {
     renderLogRows(s.recent || []);
   }
+}
+
+function tickElapsed() {
+  if (runFrozenElapsedSec !== null || runStartMs === null) return;
+  const elapsed = (Date.now() - runStartMs) / 1000;
+  $("statElapsed").textContent = `${elapsed.toFixed(1)}s`;
 }
 
 function escapeHtml(s) {
@@ -716,12 +748,19 @@ async function pollRun() {
 
 function startPolling() {
   stopPolling();
-  pollHandle = setInterval(pollRun, 500);
+  // 1s poll instead of 500ms — at 1000+ requests the snapshot endpoint
+  // does an O(N) sort on every call. The local elapsed ticker handles the
+  // smooth-counter feel without hammering the server.
+  pollHandle = setInterval(pollRun, 1000);
+  if (elapsedTickHandle) clearInterval(elapsedTickHandle);
+  elapsedTickHandle = setInterval(tickElapsed, 200);
 }
 
 function stopPolling() {
   if (pollHandle) clearInterval(pollHandle);
   pollHandle = null;
+  if (elapsedTickHandle) clearInterval(elapsedTickHandle);
+  elapsedTickHandle = null;
 }
 
 // --- RAG toggle wiring ---
@@ -785,6 +824,10 @@ $("runBtn").addEventListener("click", async () => {
     showAllLogs = false;
     $("toggleLogsBtn").textContent = "Show all";
     $("logsMode").textContent = "live tail (last 50)";
+    runStartMs = Date.now();
+    runFrozenElapsedSec = null;
+    lastPaintedCompleted = -1;
+    $("statElapsed").textContent = "0.0s";
     toast(`started run ${run_id}`);
     startPolling();
     pollRun();
