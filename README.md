@@ -13,14 +13,15 @@ NGINX (port 8008, least-conn)
         ↓
 Master Nodes (master1 :7001, master2 :7002)
         ↓
-  ┌─────────────────────┬───────────────────────────┐
-  │                     │                           │
-CPU workers       Thunder GPU worker
-(local docker)    (remote rented GPU instance,
-                   Llama 3.1 8B Instruct)
+  ┌─────────────────────┬─────────────────────────────────────┐
+  │                     │                                     │
+CPU workers       Thunder GPU workers
+(local docker,    (4 workers across 2 rented instances,
+ 1 per master)     2× A100 80GB each, Llama 3.1 8B,
+                   2 workers per master — symmetric)
 ```
 
-Two master nodes load-balanced by nginx. Each master runs a scheduler that picks workers based on request size (large requests → GPU only; small requests → GPU first with overflow to CPU). Workers heartbeat every 5s; failed workers go into exponential cooldown. The Thunder GPU worker connects from a rented instance over a `tnr connect -t` port forward + a `cloudflared` reverse tunnel.
+Two master nodes load-balanced by nginx. Each master runs a scheduler that picks workers based on request size (large requests → GPU only; small requests → GPU first with overflow to CPU). Workers heartbeat every 5s; failed workers go into exponential cooldown. Thunder GPU workers reach the masters via `cloudflared` Quick Tunnels (heartbeats) and are reachable from masters via `tnr ports forward` HTTPS URLs (`/generate` callbacks).
 
 ## Project Structure
 
@@ -86,11 +87,19 @@ python -m client.app
 
 Open `http://localhost:8050`. The UI shows docker services, live worker registry across masters, and a load-test runner with CSV export.
 
-### 4. Thunder GPU worker (optional, for the GPU layer)
+### 4. Thunder GPU workers (optional, for the GPU layer)
 
-The full Thunder Compute setup — provisioning the instance, uploading code with `tnr scp`, opening the `cloudflared` tunnel, running `tnr connect 0 -t 8000 -t 8001` for port forwarding, and starting the worker in tmux — is documented in detail in [`onboard.md`](onboard.md#thunder-compute-gpu-worker--full-setup). A condensed run guide is in [`workers/THUNDER_SETUP.md`](workers/THUNDER_SETUP.md).
+The full Thunder Compute walkthrough — provisioning instances, fixing
+Windows SSH key permissions, `tnr scp` of the worker code, `tnr ports
+forward` for public HTTPS endpoints, two `cloudflared` Quick Tunnels for
+master heartbeats, the `WORKER_DEVICE` patch for multi-GPU pinning, and
+launching 4 workers in tmux — lives in [`workers/THUNDER_SETUP.md`](workers/THUNDER_SETUP.md). [`onboard.md`](onboard.md#thunder-compute-gpu-workers) has a condensed reference with the runtime architecture diagram.
 
-In short: Thunder hosts the FastAPI worker process on a rented GPU. A `cloudflared` quick tunnel exposes your master so the worker can heartbeat home; a `tnr connect -t` port-forward lets the master reach the worker for `/generate` calls. No extra container is built locally — the Thunder worker is a Python process on the rented box.
+In short: each Thunder instance runs N FastAPI worker processes (one per
+GPU), exposed via `tnr ports forward` HTTPS URLs. `cloudflared` exposes
+each master at a public URL so workers can POST heartbeats. No extra
+container is built locally — Thunder workers are plain Python processes
+on the rented boxes.
 
 ---
 
@@ -124,7 +133,7 @@ See [`onboard.md`](onboard.md) for the full verification flow, the worker API co
 - **Docker Compose** — local cluster orchestration (masters + nginx + CPU workers)
 - **Thunder Compute** — rented GPU instances for the GPU worker layer
 - **cloudflared** — public quick tunnels exposing masters to remote workers
-- **tnr CLI** — Thunder Compute SSH wrapper with built-in port forwarding (`tnr connect -t`)
+- **tnr CLI** — Thunder Compute SSH wrapper with built-in port forwarding (`tnr ports forward` for persistent HTTPS exposure; `tnr connect -t` for ad-hoc laptop-side forwards)
 - **tmux** — keeping worker processes alive across SSH sessions
 - (planned) **ChromaDB + sentence-transformers** for RAG, **Prometheus** for metrics
 
@@ -133,5 +142,5 @@ See [`onboard.md`](onboard.md) for the full verification flow, the worker API co
 ## Documentation
 
 - [`onboard.md`](onboard.md) — full architecture, Thunder Compute walkthrough, API contract, verification, ports
-- [`workers/THUNDER_SETUP.md`](workers/THUNDER_SETUP.md) — short Thunder run guide (env vars, troubleshooting)
+- [`workers/THUNDER_SETUP.md`](workers/THUNDER_SETUP.md) — full Thunder Compute walkthrough (provisioning, key permissions, `tnr ports forward`, `cloudflared`, `WORKER_DEVICE` GPU pinning, troubleshooting)
 - [`workers/KAGGLE_SETUP.md`](workers/KAGGLE_SETUP.md) — retired, kept for historical reference

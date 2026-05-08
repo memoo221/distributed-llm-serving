@@ -13,7 +13,9 @@ Client / Test UI → NGINX:8008 → Master Nodes:7000 → Worker Nodes (local CP
 Workers are heterogeneous:
 
 - **CPU workers** load Qwen 2.5 0.5B locally (in-process slot, single-stream).
-- **Thunder GPU workers** run a CUDA-backed FastAPI server on a rented [Thunder Compute](https://thundercompute.com) instance, hosting a real GPU model (default: Llama 3.1 8B Instruct). They count as `device_type: "gpu"` for scheduling.
+- **Thunder GPU workers** run a CUDA-backed FastAPI server on rented [Thunder Compute](https://thundercompute.com) instances, hosting a real GPU model (default: Llama 3.1 8B Instruct). They count as `device_type: "gpu"` for scheduling.
+
+The default cluster shape is **symmetric**: 2 Thunder instances × 2 A100 80GB GPUs each = **4 GPU workers total**, with 2 heartbeating to `master1` and 2 to `master2`. CPU workers stay 1-per-master.
 
 The master's scheduler does threshold-based routing: requests with an estimated token score ≥ 256 go GPU-only; smaller requests prefer GPU while it has headroom, with overflow to CPU via JSQ(2) ([master/services/scheduler.py](master/services/scheduler.py)).
 
@@ -25,7 +27,7 @@ The **client test UI** at `http://localhost:8050` lets you start/stop services, 
 
 ## Stack
 
-The local Docker Compose stack runs the masters, NGINX, and CPU workers. **Thunder GPU workers run outside docker** on a rented Thunder Compute instance and connect over a tunnel — see the Thunder section below.
+The local Docker Compose stack runs the masters, NGINX, and CPU workers. **Thunder GPU workers run outside docker** on rented Thunder Compute instances and reach the masters via cloudflared tunnels (heartbeats) and `tnr ports forward` HTTPS URLs (request callbacks) — see the Thunder section below.
 
 ### What's included (running locally)
 
@@ -36,7 +38,7 @@ The local Docker Compose stack runs the masters, NGINX, and CPU workers. **Thund
 
 ### What runs remotely
 
-- 1 Thunder GPU worker (asymmetric setup with Llama 3.1 8B, registered with master1)
+- 4 Thunder GPU workers across 2 instances (Llama 3.1 8B), 2 registered with master1 and 2 with master2 — see [`workers/THUNDER_SETUP.md`](workers/THUNDER_SETUP.md) for the full walkthrough
 
 ### Files
 
@@ -69,7 +71,7 @@ docker compose up -d --build nginx master1 master2 cpu_worker_1_1 cpu_worker_2_1
 docker compose ps -a
 ```
 
-Expected `Up`: `distributed-nginx`, `master1`, `master2`, `cpu_worker_1_1`, `cpu_worker_2_1`. The Thunder worker is launched separately on the Thunder instance.
+Expected `Up`: `distributed-nginx`, `master1`, `master2`, `cpu_worker_1_1`, `cpu_worker_2_1`. Thunder workers are launched separately on the Thunder instances.
 
 ### How to verify (local stack only)
 
@@ -126,220 +128,84 @@ Open `http://localhost:8050`. The UI has three panels:
 
 ---
 
-## Thunder Compute GPU Worker — Full Setup
+## Thunder Compute GPU Workers
 
-The Thunder worker is a Python FastAPI process running on a rented GPU instance. It heartbeats back to a master and serves `/generate` calls.
+The full Thunder walkthrough (provisioning, key permissions, code upload,
+`tnr ports forward`, cloudflared tunnels, the multi-GPU `WORKER_DEVICE`
+patch, and troubleshooting) lives in [`workers/THUNDER_SETUP.md`](workers/THUNDER_SETUP.md).
 
-### Architecture
+### What it looks like at runtime
+
+The default cluster shape uses 2 Thunder instances, each with 2× A100
+80GB GPUs, running 4 worker processes total:
 
 ```
-Your laptop (NAT'd)                       Thunder GPU instance (public-ish IP)
-┌─────────────────────────────────────┐   ┌────────────────────────────────────┐
-│ docker:                             │   │ uvicorn :8000                      │
-│   nginx, master1, master2, CPU      │   │   thunder_worker.py                │
-│ host processes:                     │   │   loads Llama 3.1 8B on CUDA       │
-│   client UI :8050                   │   │                                    │
-│   2× cloudflared (master tunnels)   │◄──┤ heartbeat → master cloudflared URL │
-│   1× tnr connect -t 8000 -t 8001    │──►│ /generate ← master via host.docker │
-│      (port forwards laptop→Thunder) │   │                                    │
-└─────────────────────────────────────┘   └────────────────────────────────────┘
+Your laptop (NAT'd)                                  Thunder instance A (id 0, uuid q5lbf7oe)
+┌──────────────────────────────────────────┐        ┌─────────────────────────────────────────┐
+│ docker: nginx, master1, master2, CPUs    │        │ uvicorn :8000  thunder_a_gpu0 → cuda:0  │
+│ cloudflared :7001 → MASTER1_URL          │ ◄──────┤   heartbeats to MASTER1_URL             │
+│ cloudflared :7002 → MASTER2_URL          │        │ uvicorn :8001  thunder_a_gpu1 → cuda:1  │
+│                                          │ ◄──────┤   heartbeats to MASTER2_URL             │
+│ master /generate → https://q5lbf7oe-...  │ ──────►│   exposed via `tnr ports forward`       │
+└──────────────────────────────────────────┘        └─────────────────────────────────────────┘
+                                                     Thunder instance B (id 1, uuid tn9t67pp)
+                                                     ┌─────────────────────────────────────────┐
+                                                     │ thunder_b_gpu0 → cuda:0 → MASTER1_URL   │
+                                                     │ thunder_b_gpu1 → cuda:1 → MASTER2_URL   │
+                                                     └─────────────────────────────────────────┘
 ```
 
 Why this shape:
 
-- **Worker → master** (heartbeats): master is behind your laptop's NAT. We expose master1 (and master2) over a public URL using `cloudflared`'s anonymous "Quick Tunnel" feature, so the Thunder worker has somewhere reachable to POST heartbeats.
-- **Master → worker** (`/generate` calls): Thunder's instance firewalls inbound ports by default. Instead of opening them, we use `tnr connect -t PORT` to forward the laptop's localhost ports to the Thunder instance. The master container reaches the worker via `http://host.docker.internal:8000`, which Docker Desktop maps to the Windows host's localhost, which the `tnr -t` forward delivers to Thunder.
+- **Worker → master** (heartbeats): masters live behind your laptop's
+  NAT. Each master is exposed via a `cloudflared` Quick Tunnel so workers
+  have a public URL to POST heartbeats to.
+- **Master → worker** (`/generate` calls): `tnr ports forward` exposes
+  Thunder ports at public HTTPS URLs (`https://<uuid>-<port>.thundercompute.net`),
+  which masters call directly. No laptop relay needed (this replaces the
+  older `tnr connect -t` flow).
+- **GPU pinning**: Thunder's CUDA runtime intercepts `CUDA_VISIBLE_DEVICES`
+  and routes everything to the first physical GPU. The worker honors a
+  `WORKER_DEVICE` env var (`cuda:0` / `cuda:1`) and calls
+  `model.to(WORKER_DEVICE)` explicitly, which PyTorch respects.
 
-### Step 1 — Provision a Thunder instance
+### Worker → master mapping
 
-1. Sign up at [thundercompute.com](https://thundercompute.com) and install the `tnr` CLI.
-2. Authenticate: `tnr login`
-3. Create an instance with enough VRAM for your model:
-   - Llama 3.1 8B in fp16 needs ~16GB — pick a GPU with ≥ 20GB to be safe (A100, A10, etc.)
-   - Smaller models (Qwen 0.5B) fit on T4s (16GB)
-4. Find your instance ID:
-   ```powershell
-   tnr list
-   ```
-   The instance ID is typically `0` for your first one.
+| Worker ID | Instance | GPU | Port | SELF_URL | Heartbeats to |
+|---|---|---|---|---|---|
+| `thunder_a_gpu0` | 0 (`q5lbf7oe`) | 0 | 8000 | `https://q5lbf7oe-8000.thundercompute.net` | master1 |
+| `thunder_a_gpu1` | 0 (`q5lbf7oe`) | 1 | 8001 | `https://q5lbf7oe-8001.thundercompute.net` | master2 |
+| `thunder_b_gpu0` | 1 (`tn9t67pp`) | 0 | 8000 | `https://tn9t67pp-8000.thundercompute.net` | master1 |
+| `thunder_b_gpu1` | 1 (`tn9t67pp`) | 1 | 8001 | `https://tn9t67pp-8001.thundercompute.net` | master2 |
 
-### Step 2 — Upload the worker code to Thunder
+Master1 ends up with `cpu_worker_1_1` + 2 GPU workers; master2 with
+`cpu_worker_2_1` + 2 GPU workers. NGINX least-conn distributes requests
+roughly 50/50 across masters.
 
-From the project root on your laptop, upload just the two files the Thunder worker needs:
-
-```powershell
-tnr scp workers/thunder_worker.py workers/thunder_requirements.txt 0:
-```
-
-Both files land in `/home/ubuntu/` on instance 0. The worker is self-contained — it doesn't import anything from the rest of the project, so there's no need to ship the whole repo.
-
-> If you change `thunder_worker.py` later, re-run the same `tnr scp` command to push the new version (then restart the worker process on Thunder).
-
-### Step 3 — Install Python dependencies on Thunder
-
-SSH into the instance and install. **This is the only time you use a plain `tnr connect 0` (no `-t` flag).**
-
-```powershell
-tnr connect 0
-```
-
-Then on Thunder (the two files are already in `~/` from step 2):
-
-```bash
-cd ~
-pip install -r thunder_requirements.txt
-exit           # back to your laptop
-```
-
-### Step 4 — Start the cloudflared tunnel for master1 (heartbeat path)
-
-The Thunder worker needs a public URL to POST heartbeats. We use `cloudflared`'s no-account quick tunnel.
-
-```powershell
-# Install once, if you haven't:
-winget install --id Cloudflare.cloudflared
-
-# Start the tunnel for master1 — leave this terminal OPEN
-cloudflared tunnel --url http://localhost:7001
-```
-
-Cloudflared prints a URL like:
-
-```
-Your quick Tunnel has been created! Visit it at:
-https://wandering-mountain-1234.trycloudflare.com
-```
-
-Copy this URL. **Do not close this terminal** — closing it kills the tunnel.
-
-> **Optional second tunnel for master2:** if you ever run a *second* Thunder worker registered to master2, repeat this step in another terminal with port `7002`. With the current asymmetric Llama 3.1 8B setup (one Thunder worker only), one tunnel is enough.
-
-### Step 5 — Open the SSH port forward (`tnr connect -t`)
-
-In a **separate terminal** on your laptop, run `tnr connect` with port-forwarding flags. This drops you into a shell on Thunder *and* forwards `localhost:8000` (and optionally `:8001`) on your laptop to the same ports on Thunder:
-
-```powershell
-tnr connect 0 -t 8000 -t 8001
-```
-
-You're now SSH'd into Thunder. **Do not exit this shell** — the port forward dies if you exit. Use this same shell (with `tmux`) to run the worker process in step 6.
-
-> Why both `-t 8000` and `-t 8001`? The original symmetric setup (Qwen 0.5B, two workers) used both ports — one per master. The asymmetric Llama setup only needs `-t 8000`, but specifying both is harmless.
-
-### Step 6 — Run the worker in tmux (inside the `tnr connect -t` shell)
-
-The `tnr connect -t` shell must stay alive. To run multiple persistent commands in it, use `tmux`:
-
-```bash
-tmux new -s workers
-```
-
-In the tmux pane, start the Thunder worker. Set `HF_TOKEN` because Llama 3.1 is gated:
-
-```bash
-export HF_TOKEN=hf_yourtoken_here
-
-PYTHONUNBUFFERED=1 \
-MASTER_URL=https://wandering-mountain-1234.trycloudflare.com \
-SELF_URL=http://host.docker.internal:8000 \
-WORKER_ID=thunder_worker_1 \
-uvicorn thunder_worker:app --host 0.0.0.0 --port 8000
-```
-
-Replace the cloudflared URL with the one you copied in step 4. You should see:
-
-```
-[thunder_worker_1] loading meta-llama/Llama-3.1-8B-Instruct on cuda...
-... (model downloads from HF, ~16GB, takes a few minutes the first time)
-[thunder_worker_1] loaded in 90.0s, vram_used=15800MB
-[thunder_worker_1] master=https://wandering-mountain-1234.trycloudflare.com, self_url=http://host.docker.internal:8000
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:8000
-```
-
-Detach from tmux with `Ctrl+B` then `D` so it keeps running. Reattach later with `tmux attach -t workers`.
-
-### Step 7 — Verify
-
-On your laptop:
-
-```powershell
-# Master1 should now show the Thunder worker
-curl.exe http://localhost:7001/scheduler/workers
-```
-
-Look for `thunder_worker_1` with `device_type: "gpu"` and `last_seen_sec_ago < 10`.
-
-End-to-end:
-
-```powershell
-Invoke-RestMethod -Uri "http://localhost:8008/generate" -Method Post -ContentType "application/json" -Body '{"prompt":"Say hello","max_new_tokens":32}'
-```
-
-The `worker_id` in the response should sometimes be `thunder_worker_1` (when nginx routes to master1 and the GPU is picked).
-
-Or open the test UI at `http://localhost:8050` — Thunder workers appear in the Live Workers panel.
-
-### Terminals you must keep open
-
-For Thunder to keep working, the following terminals/shells **must stay running** on your laptop:
+### Persistent terminals
 
 | Terminal | What it runs | Closes if you... |
 |---|---|---|
-| 1 | `cloudflared tunnel --url http://localhost:7001` (master1 tunnel) | close terminal |
-| 2 | `tnr connect 0 -t 8000 -t 8001` (port forwards + Thunder shell with tmux) | exit the shell |
-| 3 | `python -m client.app` (test UI — optional) | close terminal |
+| A | `cloudflared tunnel --url http://localhost:7001` (master1) | close terminal |
+| B | `cloudflared tunnel --url http://localhost:7002` (master2) | close terminal |
+| (host) | `python -m client.app` (test UI — optional) | close terminal |
 
-Inside terminal 2, the worker process runs in a tmux pane. tmux survives if SSH drops *as long as the SSH connection itself stays open* — but if `tnr connect` exits, the tunnels die and Thunder can no longer be reached, even though the worker process is still running on the instance.
+Thunder side requires no persistent local terminal: `tnr ports forward` is
+server-side persistent and tmux sessions on Thunder survive SSH disconnects.
 
-### Recovering from a disconnect
-
-If `tnr connect` drops or you accidentally close terminal 2:
-
-```powershell
-tnr connect 0 -t 8000 -t 8001
-tmux attach -t workers   # the worker is still running, you just need to re-tunnel
-```
-
-If `cloudflared` drops:
+### Verify after launch
 
 ```powershell
-cloudflared tunnel --url http://localhost:7001
+curl.exe http://localhost:7001/scheduler/workers   # CPU + thunder_a_gpu0 + thunder_b_gpu0
+curl.exe http://localhost:7002/scheduler/workers   # CPU + thunder_a_gpu1 + thunder_b_gpu1
+
+Invoke-RestMethod -Uri "http://localhost:8008/generate" -Method Post `
+  -ContentType "application/json" `
+  -Body '{"prompt":"hello","max_new_tokens":32}'
 ```
 
-Then **update the worker's `MASTER_URL`** because the trycloudflare URL is random and changes on every restart:
-
-```bash
-# In tmux, kill the worker and restart it with the new URL
-# (Ctrl+C to kill, then re-run with new MASTER_URL)
-```
-
-If this URL churn becomes annoying, sign up for a free Cloudflare account, claim a free domain from Cloudflare Registrar, and use a **named tunnel** for stable URLs.
-
-### Configuration
-
-Env vars on the Thunder worker:
-
-| Variable | Purpose | Default |
-|---|---|---|
-| `MODEL_NAME` | HF Hub id or local path | `meta-llama/Llama-3.1-8B-Instruct` |
-| `WORKER_ID` | Heartbeat identity | `thunder_worker_1` |
-| `SELF_URL` | URL the master uses to call back | `http://localhost:8000` |
-| `MASTER_URL` | Heartbeat target (cloudflared URL) | (empty — heartbeats skipped) |
-| `HEARTBEAT_INTERVAL` | seconds between heartbeats | `5` |
-| `HF_TOKEN` | required for gated models like Llama | n/a |
-| `PYTHONUNBUFFERED` | flush stdout (recommended for live logs) | `1` |
-
-### Asymmetric setup details
-
-With Llama 3.1 8B (~16GB VRAM in fp16), only one Thunder worker fits per GPU. The current setup is:
-
-- master1 → has both `cpu_worker_1_1` (CPU) AND `thunder_worker_1` (GPU)
-- master2 → has only `cpu_worker_2_1` (CPU)
-
-NGINX still load-balances incoming requests across both masters (least_conn). When a request lands on master2, it goes to CPU. When it lands on master1, it goes to GPU first, then spills to CPU when GPU saturates.
-
-To restore the symmetric setup with two GPU workers, swap the model to a smaller one (e.g. Qwen 0.5B) and run two worker processes on Thunder, one per port — but you'll lose the model quality of Llama 3.1 8B.
+For the full step-by-step (CLI install, key permissions fix, model
+gating workarounds, etc.), follow [`workers/THUNDER_SETUP.md`](workers/THUNDER_SETUP.md).
 
 ---
 
@@ -393,8 +259,8 @@ Posted to `MASTER_URL/heartbeat` every 5 seconds:
 
 ```json
 {
-  "worker_id": "thunder_worker_1",
-  "url": "http://host.docker.internal:8000",
+  "worker_id": "thunder_a_gpu0",
+  "url": "https://q5lbf7oe-8000.thundercompute.net",
   "device_type": "gpu",
   "active_requests": 0,
   "queue_depth": 0,
@@ -430,7 +296,7 @@ python tests/simulate_worker_scheduling.py --base-url http://localhost:8008 --re
 docker compose start master1
 ```
 
-While master1 is down, every successful response should come from a `_2_*` worker (CPU only, since Thunder is registered with master1). After restart, traffic returns to a mix.
+While master1 is down, every successful response should come from master2's pool: `cpu_worker_2_1`, `thunder_a_gpu1`, `thunder_b_gpu1`. After restart, traffic returns to a balanced mix across both masters.
 
 ---
 
