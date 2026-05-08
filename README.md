@@ -16,12 +16,13 @@ Master Nodes (master1 :7001, master2 :7002)
   ┌─────────────────────┬─────────────────────────────────────┐
   │                     │                                     │
 CPU workers       Thunder GPU workers
-(local docker,    (4 workers across 2 rented instances,
- 1 per master)     2× A100 80GB each, Llama 3.1 8B,
-                   2 workers per master — symmetric)
+(local docker,    (2 workers across 2 rented instances,
+ 1 per master,    2× A100 80GB each, Llama 3.1 8B,
+ Qwen 2.5 0.5B)   1 worker per master — symmetric.
+                   Continuous batching, BATCH_SIZE=64.)
 ```
 
-Two master nodes load-balanced by nginx. Each master runs a scheduler that picks workers based on request size (large requests → GPU only; small requests → GPU first with overflow to CPU). Workers heartbeat every 5s; failed workers go into exponential cooldown. Thunder GPU workers reach the masters via `cloudflared` Quick Tunnels (heartbeats) and are reachable from masters via `tnr ports forward` HTTPS URLs (`/generate` callbacks).
+Two master nodes load-balanced by nginx. Each master runs a scheduler that picks workers based on request size (large requests → GPU only; small requests → GPU first with overflow to CPU). Workers heartbeat every 5s; failed workers go into exponential cooldown. Thunder GPU workers reach the masters via `cloudflared` Quick Tunnels (heartbeats) and are reachable from masters via `tnr ports forward` HTTPS URLs (`/generate` callbacks). Each Thunder worker batches up to 64 concurrent requests into a single forward pass; the worker advertises this as its `slots` value in the heartbeat and the master honors it for scheduling.
 
 ## Project Structure
 
@@ -33,10 +34,11 @@ distributed-llm-serving/
 │   └── services/   # config, registry, scheduler, forwarder, models
 ├── workers/        # Worker implementations
 │   ├── worker_router.py / worker_service.py    # Local CPU (Qwen 2.5 0.5B)
-│   ├── thunder_worker.py                       # Remote GPU on Thunder Compute
+│   ├── thunder_worker.py                       # Remote GPU on Thunder Compute (continuous batching)
 │   ├── thunder_requirements.txt
-│   ├── THUNDER_SETUP.md                        # One-page Thunder run guide
-│   ├── groq_worker.py / Dockerfile.groq        # Dormant — Groq integration kept for revertability
+│   ├── launch_workers.sh                       # Thunder-side bash launcher (kill old + spawn tmux)
+│   ├── THUNDER_SETUP.md                        # Comprehensive Thunder walkthrough
+│   ├── groq_worker.py / Dockerfile.groq        # Dormant — gated behind --profile groq
 │   ├── kaggle_worker.py / KAGGLE_SETUP.md      # Retired — old Kaggle GPU path
 │   └── inference.py                            # Shared model-loading helpers
 ├── nginx/nginx.conf                            # Layer-7 load balancer config
@@ -45,6 +47,8 @@ distributed-llm-serving/
 │   ├── runner.py
 │   ├── docker_control.py
 │   └── static/index.html
+├── scripts/
+│   └── redeploy.ps1                            # Laptop-side Thunder redeploy driver
 ├── models/         # Local model files + download script
 ├── llm/, rag/, monitoring/, common/, lb/       # Subsystems
 ├── tests/          # Load + scheduler + smoke tests
@@ -92,11 +96,20 @@ Open `http://localhost:8050`. The UI shows docker services, live worker registry
 The full Thunder Compute walkthrough — provisioning instances, fixing
 Windows SSH key permissions, `tnr scp` of the worker code, `tnr ports
 forward` for public HTTPS endpoints, two `cloudflared` Quick Tunnels for
-master heartbeats, the `WORKER_DEVICE` patch for multi-GPU pinning, and
-launching 4 workers in tmux — lives in [`workers/THUNDER_SETUP.md`](workers/THUNDER_SETUP.md). [`onboard.md`](onboard.md#thunder-compute-gpu-workers) has a condensed reference with the runtime architecture diagram.
+master heartbeats, the `WORKER_DEVICE` patch for GPU pinning, continuous
+batching, and the launch flow — lives in [`workers/THUNDER_SETUP.md`](workers/THUNDER_SETUP.md). [`onboard.md`](onboard.md#thunder-compute-gpu-workers) has a condensed reference with the runtime architecture diagram.
 
-In short: each Thunder instance runs N FastAPI worker processes (one per
-GPU), exposed via `tnr ports forward` HTTPS URLs. `cloudflared` exposes
+Day-to-day Thunder redeploys are one command:
+
+```powershell
+.\scripts\redeploy.ps1            # idempotent — skips if workers already healthy
+.\scripts\redeploy.ps1 -Force     # force redeploy (e.g. after editing thunder_worker.py)
+```
+
+The script pushes [`thunder_worker.py`](workers/thunder_worker.py) and [`launch_workers.sh`](workers/launch_workers.sh) to both instances in parallel, kicks off `bash launch_workers.sh` over `tnr connect`, then polls master registries until both workers heartbeat. Edit the `$Config` block at the top to change `BATCH_SIZE`, cloudflared URLs, or the HF token.
+
+In short: each Thunder instance runs ONE FastAPI worker process (on
+`cuda:0`), exposed via `tnr ports forward` HTTPS URLs. `cloudflared` exposes
 each master at a public URL so workers can POST heartbeats. No extra
 container is built locally — Thunder workers are plain Python processes
 on the rented boxes.

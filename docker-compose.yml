@@ -54,6 +54,7 @@ services:
     restart: unless-stopped
 
   groq_worker_1_2:
+    profiles: ["groq"]
     build:
       context: .
       dockerfile: workers/Dockerfile.groq
@@ -65,8 +66,9 @@ services:
       - SELF_URL=http://groq_worker_1_2:8000
     ports:
       - "8000:8000"
-    restart: unless-stopped 
+    restart: unless-stopped
   groq_worker_1_3:
+    profiles: ["groq"]
     build:
       context: .
       dockerfile: workers/Dockerfile.groq
@@ -78,8 +80,9 @@ services:
       - SELF_URL=http://groq_worker_1_3:8000
     ports:
       - "8002:8000"
-    restart: unless-stopped 
+    restart: unless-stopped
   groq_worker_1_4:
+    profiles: ["groq"]
     build:
       context: .
       dockerfile: workers/Dockerfile.groq
@@ -91,7 +94,7 @@ services:
       - SELF_URL=http://groq_worker_1_4:8000
     ports:
       - "8003:8000"
-    restart: unless-stopped 
+    restart: unless-stopped
 
   cpu_worker_2_1:
       build:
@@ -110,6 +113,7 @@ services:
       restart: unless-stopped
   
   groq_worker_2_2:
+    profiles: ["groq"]
     build:
       context: .
       dockerfile: workers/Dockerfile.groq
@@ -121,8 +125,9 @@ services:
       - SELF_URL=http://groq_worker_2_2:8000
     ports:
       - "8001:8000"
-    restart: unless-stopped      
+    restart: unless-stopped
   groq_worker_2_3:
+    profiles: ["groq"]
     build:
       context: .
       dockerfile: workers/Dockerfile.groq
@@ -134,8 +139,9 @@ services:
       - SELF_URL=http://groq_worker_2_3:8000
     ports:
       - "8004:8000"
-    restart: unless-stopped      
+    restart: unless-stopped
   groq_worker_2_4:
+    profiles: ["groq"]
     build:
       context: .
       dockerfile: workers/Dockerfile.groq
@@ -147,5 +153,5 @@ services:
       - SELF_URL=http://groq_worker_2_4:8000
     ports:
       - "8005:8000"
-    restart: unless-stopped      
+    restart: unless-stopped
 

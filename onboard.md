@@ -15,7 +15,7 @@ Workers are heterogeneous:
 - **CPU workers** load Qwen 2.5 0.5B locally (in-process slot, single-stream).
 - **Thunder GPU workers** run a CUDA-backed FastAPI server on rented [Thunder Compute](https://thundercompute.com) instances, hosting a real GPU model (default: Llama 3.1 8B Instruct). They count as `device_type: "gpu"` for scheduling.
 
-The default cluster shape is **symmetric**: 2 Thunder instances × 2 A100 80GB GPUs each = **4 GPU workers total**, with 2 heartbeating to `master1` and 2 to `master2`. CPU workers stay 1-per-master.
+The default cluster shape is **symmetric**: 2 Thunder instances × 1 worker each on `cuda:0` = **2 GPU workers total**, one heartbeating to `master1` and one to `master2`. CPU workers stay 1-per-master. Each instance has a second A100 idle on `cuda:1` — running a second worker per instance was tried and consistently caused CUDA stalls on the second process; see [`workers/THUNDER_SETUP.md`](workers/THUNDER_SETUP.md) for the rationale.
 
 The master's scheduler does threshold-based routing: requests with an estimated token score ≥ 256 go GPU-only; smaller requests prefer GPU while it has headroom, with overflow to CPU via JSQ(2) ([master/services/scheduler.py](master/services/scheduler.py)).
 
@@ -38,17 +38,18 @@ The local Docker Compose stack runs the masters, NGINX, and CPU workers. **Thund
 
 ### What runs remotely
 
-- 4 Thunder GPU workers across 2 instances (Llama 3.1 8B), 2 registered with master1 and 2 with master2 — see [`workers/THUNDER_SETUP.md`](workers/THUNDER_SETUP.md) for the full walkthrough
+- 2 Thunder GPU workers (Llama 3.1 8B) — one per instance on `cuda:0`. Instance 0's worker registers with master1; instance 1's with master2. Continuous batching with `BATCH_SIZE=64` (advertised as `slots` in heartbeats). See [`workers/THUNDER_SETUP.md`](workers/THUNDER_SETUP.md) for the walkthrough.
 
 ### Files
 
-- `docker-compose.yml`
+- `docker-compose.yml` (Groq services gated behind `profiles: ["groq"]` — not started by default)
 - `nginx/nginx.conf`
 - `master/Dockerfile.master_node`, `master/master_app.py`, `master/services/*` (registry, forwarder, scheduler), `master/routers/master_router.py`
 - `workers/Dockerfile.cpu`, `workers/worker_router.py`, `workers/worker_service.py` — local CPU pipeline
-- `workers/thunder_worker.py`, `workers/thunder_requirements.txt`, `workers/THUNDER_SETUP.md` — remote GPU worker for Thunder Compute
-- `workers/Dockerfile.groq`, `workers/groq_worker.py` — dormant Groq cloud shim (not started)
+- `workers/thunder_worker.py`, `workers/thunder_requirements.txt`, `workers/launch_workers.sh`, `workers/THUNDER_SETUP.md` — remote GPU worker + launch script for Thunder Compute
+- `workers/Dockerfile.groq`, `workers/groq_worker.py` — dormant Groq cloud shim (gated behind `--profile groq`)
 - `client/app.py`, `client/runner.py`, `client/docker_control.py`, `client/static/index.html` — test UI
+- `scripts/redeploy.ps1` — one-shot Thunder worker redeploy (parallel scp + launch + heartbeat verify)
 - `tests/simulate_nginx_lb.py` — nginx-level master LB test
 - `tests/simulate_worker_scheduling.py` — end-to-end scheduler test
 - `tests/smoke_worker_node.py` — direct smoke test of `WorkerNode` (CPU + remote)
@@ -136,22 +137,22 @@ patch, and troubleshooting) lives in [`workers/THUNDER_SETUP.md`](workers/THUNDE
 
 ### What it looks like at runtime
 
-The default cluster shape uses 2 Thunder instances, each with 2× A100
-80GB GPUs, running 4 worker processes total:
+The default cluster shape: 2 Thunder instances, one worker each on
+`cuda:0`, each registered to a different master:
 
 ```
 Your laptop (NAT'd)                                  Thunder instance A (id 0, uuid q5lbf7oe)
 ┌──────────────────────────────────────────┐        ┌─────────────────────────────────────────┐
 │ docker: nginx, master1, master2, CPUs    │        │ uvicorn :8000  thunder_a_gpu0 → cuda:0  │
 │ cloudflared :7001 → MASTER1_URL          │ ◄──────┤   heartbeats to MASTER1_URL             │
-│ cloudflared :7002 → MASTER2_URL          │        │ uvicorn :8001  thunder_a_gpu1 → cuda:1  │
-│                                          │ ◄──────┤   heartbeats to MASTER2_URL             │
-│ master /generate → https://q5lbf7oe-...  │ ──────►│   exposed via `tnr ports forward`       │
+│ cloudflared :7002 → MASTER2_URL          │        │   (cuda:1 left idle — see "Why one      │
+│                                          │        │    worker per instance" below)          │
+│ master /generate → https://<uuid>-8000.. │ ──────►│   exposed via `tnr ports forward`       │
 └──────────────────────────────────────────┘        └─────────────────────────────────────────┘
                                                      Thunder instance B (id 1, uuid tn9t67pp)
                                                      ┌─────────────────────────────────────────┐
-                                                     │ thunder_b_gpu0 → cuda:0 → MASTER1_URL   │
-                                                     │ thunder_b_gpu1 → cuda:1 → MASTER2_URL   │
+                                                     │ uvicorn :8000  thunder_b_gpu0 → cuda:0  │
+                                                     │   heartbeats to MASTER2_URL             │
                                                      └─────────────────────────────────────────┘
 ```
 
@@ -162,25 +163,36 @@ Why this shape:
   have a public URL to POST heartbeats to.
 - **Master → worker** (`/generate` calls): `tnr ports forward` exposes
   Thunder ports at public HTTPS URLs (`https://<uuid>-<port>.thundercompute.net`),
-  which masters call directly. No laptop relay needed (this replaces the
-  older `tnr connect -t` flow).
+  which masters call directly. No laptop relay needed.
 - **GPU pinning**: Thunder's CUDA runtime intercepts `CUDA_VISIBLE_DEVICES`
   and routes everything to the first physical GPU. The worker honors a
   `WORKER_DEVICE` env var (`cuda:0` / `cuda:1`) and calls
   `model.to(WORKER_DEVICE)` explicitly, which PyTorch respects.
+- **Continuous batching**: each worker coalesces up to `BATCH_SIZE`
+  concurrent `/generate` calls (default 64) into a single
+  `model.generate()` per `BATCH_WAIT_MS` window (default 30 ms). The
+  worker advertises `slots: BATCH_SIZE` in heartbeats so the master
+  dispatches that many concurrent requests per worker. Master's
+  [`WorkerState.slots`](master/services/models.py) reads `raw["slots"]`
+  from the heartbeat and falls back to global `GPU_SLOTS` only when
+  unset — that's how the per-worker override works.
+- **Why one worker per instance** (not two): we tried running 2 workers
+  per Thunder instance (one on each A100 via `cuda:0` + `cuda:1`).
+  Thunder's "Prototyping" mode CUDA virtualization consistently stalled
+  the second process — direct curl to a hung worker confirms its
+  `model.generate()` never returns. Until Thunder fixes the underlying
+  issue (or you switch to "Production" mode / different provider), one
+  worker per instance is the only reliable shape.
 
 ### Worker → master mapping
 
 | Worker ID | Instance | GPU | Port | SELF_URL | Heartbeats to |
 |---|---|---|---|---|---|
 | `thunder_a_gpu0` | 0 (`q5lbf7oe`) | 0 | 8000 | `https://q5lbf7oe-8000.thundercompute.net` | master1 |
-| `thunder_a_gpu1` | 0 (`q5lbf7oe`) | 1 | 8001 | `https://q5lbf7oe-8001.thundercompute.net` | master2 |
-| `thunder_b_gpu0` | 1 (`tn9t67pp`) | 0 | 8000 | `https://tn9t67pp-8000.thundercompute.net` | master1 |
-| `thunder_b_gpu1` | 1 (`tn9t67pp`) | 1 | 8001 | `https://tn9t67pp-8001.thundercompute.net` | master2 |
+| `thunder_b_gpu0` | 1 (`tn9t67pp`) | 0 | 8000 | `https://tn9t67pp-8000.thundercompute.net` | master2 |
 
-Master1 ends up with `cpu_worker_1_1` + 2 GPU workers; master2 with
-`cpu_worker_2_1` + 2 GPU workers. NGINX least-conn distributes requests
-roughly 50/50 across masters.
+Each master ends up with 1 CPU + 1 GPU worker. NGINX least-conn distributes
+requests roughly 50/50 across masters.
 
 ### Persistent terminals
 
@@ -193,11 +205,28 @@ roughly 50/50 across masters.
 Thunder side requires no persistent local terminal: `tnr ports forward` is
 server-side persistent and tmux sessions on Thunder survive SSH disconnects.
 
+### Redeploying workers
+
+The full pipeline (push code, kill old, launch new, wait for heartbeats) is
+automated by [`scripts/redeploy.ps1`](scripts/redeploy.ps1):
+
+```powershell
+# Idempotent: skips if all workers are healthy
+.\scripts\redeploy.ps1
+
+# Force redeploy (after editing thunder_worker.py, changing BATCH_SIZE, etc.)
+.\scripts\redeploy.ps1 -Force
+```
+
+Edit the `$Config` block at the top to change cloudflared URLs, BATCH_SIZE,
+or HF token. The script runs both instances in parallel via `Start-Job` and
+polls master registries until all workers heartbeat (or fails after 6 min).
+
 ### Verify after launch
 
 ```powershell
-curl.exe http://localhost:7001/scheduler/workers   # CPU + thunder_a_gpu0 + thunder_b_gpu0
-curl.exe http://localhost:7002/scheduler/workers   # CPU + thunder_a_gpu1 + thunder_b_gpu1
+curl.exe http://localhost:7001/scheduler/workers   # CPU + thunder_a_gpu0
+curl.exe http://localhost:7002/scheduler/workers   # CPU + thunder_b_gpu0
 
 Invoke-RestMethod -Uri "http://localhost:8008/generate" -Method Post `
   -ContentType "application/json" `
@@ -296,7 +325,7 @@ python tests/simulate_worker_scheduling.py --base-url http://localhost:8008 --re
 docker compose start master1
 ```
 
-While master1 is down, every successful response should come from master2's pool: `cpu_worker_2_1`, `thunder_a_gpu1`, `thunder_b_gpu1`. After restart, traffic returns to a balanced mix across both masters.
+While master1 is down, every successful response should come from master2's pool: `cpu_worker_2_1` and `thunder_b_gpu0`. After restart, traffic returns to a balanced mix across both masters.
 
 ---
 
@@ -306,7 +335,7 @@ While master1 is down, every successful response should come from master2's pool
 - Master and worker images do require rebuilds: `docker compose up -d --build master1 master2`.
 - `.env` must never be committed.
 - The **Kaggle integration** documented in `workers/KAGGLE_SETUP.md` is **retired**.
-- The **Groq integration** (`workers/groq_worker.py`, `workers/Dockerfile.groq`) is dormant — kept in the repo for revertability but not started by default. To revive it, uncomment the `groq_worker_*` entries in `docker-compose.yml`'s `WORKERS_BOOTSTRAP` and bring those services up.
+- The **Groq integration** (`workers/groq_worker.py`, `workers/Dockerfile.groq`) is dormant — kept in the repo for revertability but not started by default. The `groq_worker_*` services in `docker-compose.yml` are gated behind the `groq` profile. To revive: `docker compose --profile groq up -d` (and ensure `GROQ_API_KEY_1`…`_6` are set in `.env`).
 
 ---
 

@@ -2,12 +2,20 @@
 
 This is the comprehensive walkthrough for the Thunder GPU layer of the
 distributed inference cluster. It assumes you have **2 Thunder Compute
-instances, each with 2× A100 80GB GPUs**, and want to run **4 GPU workers
-total** (one per physical GPU) in a symmetric layout: 2 workers heartbeat
-to `master1`, 2 to `master2`.
+instances, each with 2× A100 80GB GPUs**, and want to run **2 GPU workers
+total** (one per instance, on `cuda:0`), with each worker registering to a
+different master so the cluster stays symmetric.
 
-If you have a different shape (one instance, one GPU, etc.) the same flow
-applies — just run fewer workers.
+> **Why one worker per instance, not two?** We tried running a second worker
+> per instance pinned to `cuda:1`. Thunder's "Prototyping" mode CUDA
+> virtualization consistently stalled the second process — health checks
+> succeeded but `model.generate()` never returned. With only `cuda:0`
+> exercised per instance, all workers serve traffic correctly. The second
+> A100 per instance is paid-for-but-idle until Thunder fixes the
+> virtualization (or you switch to "Production" mode / different provider).
+
+If you have a different shape (one instance only, etc.), `scripts/redeploy.ps1`
+adapts — just edit the `$Config.Instances` list.
 
 ---
 
@@ -18,21 +26,21 @@ Your laptop (NAT'd)                                  Thunder instance A (id 0, u
 ┌──────────────────────────────────────────┐        ┌─────────────────────────────────────────┐
 │ docker:                                  │        │ uvicorn :8000  thunder_worker.py        │
 │   nginx :8008                            │        │   loads Llama 3.1 8B on cuda:0          │
-│   master1 :7001                          │        │ uvicorn :8001  thunder_worker.py        │
-│   master2 :7002                          │        │   loads Llama 3.1 8B on cuda:1          │
+│   master1 :7001                          │        │   batches concurrent /generate calls    │
+│   master2 :7002                          │        │   (BATCH_SIZE=64 by default)            │
 │   cpu_worker_1_1, cpu_worker_2_1         │        │                                         │
-│                                          │        │  ports 8000/8001 exposed publicly via   │
-│ host processes:                          │        │  tnr ports forward → HTTPS URLs at      │
-│   client UI :8050                        │  ◄─────┤  https://q5lbf7oe-{8000,8001}.thunderc.net
+│                                          │        │   port 8000 exposed via                 │
+│ host processes:                          │        │   tnr ports forward → HTTPS at          │
+│   client UI :8050                        │  ◄─────┤   https://q5lbf7oe-8000.thundercompute.net
 │   cloudflared :7001 → trycloudflare URL  │        │                                         │
-│   cloudflared :7002 → trycloudflare URL  │        │  workers heartbeat to those URLs        │
+│   cloudflared :7002 → trycloudflare URL  │        │   heartbeats to MASTER1_URL             │
 └──────────────────────────────────────────┘        └─────────────────────────────────────────┘
 
                                                      Thunder instance B (id 1, uuid tn9t67pp)
                                                      ┌─────────────────────────────────────────┐
                                                      │ same pattern as instance A              │
-                                                     │ port 8000 → cuda:0 → master1            │
-                                                     │ port 8001 → cuda:1 → master2            │
+                                                     │ port 8000 → cuda:0                      │
+                                                     │ heartbeats to MASTER2_URL               │
                                                      └─────────────────────────────────────────┘
 ```
 
@@ -56,6 +64,23 @@ GPU. Two workers launched with `CUDA_VISIBLE_DEVICES=0` and `=1` both end
 up on GPU 0. The patched `thunder_worker.py` reads a `WORKER_DEVICE` env
 var (e.g. `cuda:0` / `cuda:1`) and calls `model.to(WORKER_DEVICE)`
 explicitly, which PyTorch honors regardless of the masking shim.
+
+**Continuous batching.**
+Each worker runs a single `_batcher_loop` task that pulls concurrent
+`/generate` requests off an internal `asyncio.Queue` and coalesces up to
+`BATCH_SIZE` of them (default 64) into one `model.generate()` call. The
+batcher waits up to `BATCH_WAIT_MS` (default 30 ms) after the first
+request arrives to gather more before flushing. This lets multiple
+prompts share each forward pass on the GPU, multiplying effective
+throughput.
+
+The worker advertises `BATCH_SIZE` as its `slots` value in the heartbeat,
+so the master knows it can dispatch that many concurrent requests per
+worker. The master's `WorkerState.slots` honors this per-worker override
+(falling back to global `GPU_SLOTS` for workers that don't advertise).
+Empirically, `BATCH_SIZE=64` on Llama 3.1 8B fp16 / A100 80GB delivers
+~6 req/s per worker at p50 ~30s under saturation; raising to 128 returns
+diminishing throughput at the cost of higher tail latency.
 
 ---
 
@@ -258,143 +283,152 @@ Each should return the same JSON as `localhost:7001`/`7002`.
 
 ---
 
-## Step 6 — Launch the 4 worker processes
+## Step 6 — Launch the 2 worker processes
 
-For each instance, you'll start two tmux sessions: one running a worker
-on `cuda:0` (port 8000, heartbeats to master1) and one on `cuda:1` (port
-8001, heartbeats to master2).
+The fastest path is the [`scripts/redeploy.ps1`](../scripts/redeploy.ps1)
+driver — it pushes code, kills any old workers, launches new ones via
+`bash launch_workers.sh` on each instance (in parallel), and polls master
+registries until all workers heartbeat.
 
-The pattern uses `tmux send-keys` to set each env var as its own line,
-which is more robust than passing a long quoted command to `tmux new`.
+### 6.1 — Edit the redeploy config (one-time)
 
-### 6.1 — Instance 0 (workers `thunder_a_gpu0` and `thunder_a_gpu1`)
+Open `scripts/redeploy.ps1` and update the `$Config` block:
+
+```powershell
+$Config = @{
+    HfToken    = "hf_yourtoken_here"
+    Master1Url = "https://wherever-mixture-decimal-mart.trycloudflare.com"
+    Master2Url = "https://alien-rarely-could-nova.trycloudflare.com"
+    BatchSize  = 64
+    ModelName  = "meta-llama/Llama-3.1-8B-Instruct"
+    Instances = @(
+        @{ Id = 0; Uuid = "q5lbf7oe"; WorkerPrefix = "thunder_a"; MasterTarget = "master1" },
+        @{ Id = 1; Uuid = "tn9t67pp"; WorkerPrefix = "thunder_b"; MasterTarget = "master2" }
+    )
+}
+```
+
+You'll re-edit `Master1Url` / `Master2Url` whenever the cloudflared tunnels
+restart (the trycloudflare URLs are random).
+
+### 6.2 — Run the redeploy
+
+```powershell
+.\scripts\redeploy.ps1
+```
+
+Output:
+
+```
+==> Verifying cloudflared tunnels and masters
+    OK: master1 reachable via https://...
+    OK: master2 reachable via https://...
+
+==> Checking if workers are already healthy
+    OK: both thunder workers live with slots=64 - skipping redeploy
+```
+
+(Idempotent fast-path skips the redeploy entirely if everything's already
+running with the right config — typical run-time: ~3 sec.)
+
+If something needs to change, force the redeploy:
+
+```powershell
+.\scripts\redeploy.ps1 -Force
+```
+
+That will:
+
+1. **Push files** — `tnr scp workers/thunder_worker.py` and
+   `workers/launch_workers.sh` to each instance, **in parallel** via
+   PowerShell `Start-Job`.
+2. **Run the bash launcher** — pipes the kill-old-then-launch-new script
+   through `tnr connect <id>` (`stdin` works for piping commands; tnr's
+   own SSH wrapper is what authenticates).
+3. **Wait** — polls `http://localhost:7001/scheduler/workers` and
+   `:7002` every 5 sec, prints status until each worker shows up with
+   `slots: BATCH_SIZE` and `last_seen_sec_ago < 10` (or fails after 6
+   min).
+
+A full cold start (model to cuda:0 from HF cache + heartbeat) takes
+~3 minutes wall-clock for both instances combined.
+
+### 6.3 — What `launch_workers.sh` actually does
+
+The bash script runs on each Thunder instance and:
+
+1. Bootstraps `tmux` if missing (`apt-get install -y tmux`).
+2. `tmux kill-server` + `pkill -9 -f "uvicorn thunder_worker"` to clear
+   any previous workers.
+3. Removes stale `~/gpu0.log` so subsequent log polling doesn't match
+   old "Application startup complete" lines.
+4. Writes `/tmp/gpu0_launch.sh` — a self-contained bash script with all
+   the env vars (`WORKER_DEVICE=cuda:0`, `MASTER_URL=...` matching
+   `MASTER_TARGET`, `BATCH_SIZE`, etc.) and the `uvicorn` command.
+5. `tmux new -d -s gpu0 'bash /tmp/gpu0_launch.sh'` — fire-and-forget.
+   The tmux session persists server-side regardless of SSH state.
+
+Variables are *baked into a script file* rather than sent via
+`tmux send-keys` because keystroke-based env injection had a real race
+where individual `export` lines could be dropped under load — see
+"Variables not landing in tmux" in Troubleshooting.
+
+### 6.4 — Manual launch (if you want to skip the script)
+
+If you'd rather do it by hand on one instance:
 
 ```powershell
 tnr connect 0
 ```
 
-On the Thunder shell, replace `hf_yourtoken_here` with your real token
-and `MASTER1_URL` / `MASTER2_URL` with the actual trycloudflare URLs:
-
 ```bash
+sudo apt-get update && sudo apt-get install -y tmux
 export HF_TOKEN=hf_yourtoken_here
 
-# Optional: confirm the token has Llama access
-curl -s -H "Authorization: Bearer $HF_TOKEN" \
-  -o /dev/null -w "%{http_code}\n" \
-  https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/resolve/main/config.json
-# 200 = good, 401 = bad token, 403 = token works but no Llama access yet
+tmux kill-server 2>/dev/null
+pkill -9 -f "uvicorn thunder_worker" 2>/dev/null
+rm -f ~/gpu0.log
+sleep 3
 
-# GPU 0 → master1 → port 8000
-tmux new -d -s gpu0
-tmux send-keys -t gpu0 "export PYTHONUNBUFFERED=1" Enter
-tmux send-keys -t gpu0 "export HF_TOKEN='$HF_TOKEN'" Enter
-tmux send-keys -t gpu0 "export WORKER_DEVICE=cuda:0" Enter
-tmux send-keys -t gpu0 "export WORKER_ID=thunder_a_gpu0" Enter
-tmux send-keys -t gpu0 "export MASTER_URL=https://<MASTER1_URL>" Enter
-tmux send-keys -t gpu0 "export SELF_URL=https://q5lbf7oe-8000.thundercompute.net" Enter
-tmux send-keys -t gpu0 "uvicorn thunder_worker:app --host 0.0.0.0 --port 8000 2>&1 | tee gpu0.log" Enter
+cat > /tmp/gpu0_launch.sh <<EOF
+#!/usr/bin/env bash
+export PYTHONUNBUFFERED=1
+export HF_TOKEN='$HF_TOKEN'
+export WORKER_DEVICE='cuda:0'
+export BATCH_SIZE='64'
+export WORKER_ID='thunder_a_gpu0'
+export MASTER_URL='https://<MASTER1_URL>'
+export SELF_URL='https://q5lbf7oe-8000.thundercompute.net'
+export MODEL_NAME='meta-llama/Llama-3.1-8B-Instruct'
+cd /home/ubuntu
+exec uvicorn thunder_worker:app --host 0.0.0.0 --port 8000 2>&1 | tee /home/ubuntu/gpu0.log
+EOF
+chmod +x /tmp/gpu0_launch.sh
+tmux new -d -s gpu0 'bash /tmp/gpu0_launch.sh'
 
-# GPU 1 → master2 → port 8001
-tmux new -d -s gpu1
-tmux send-keys -t gpu1 "export PYTHONUNBUFFERED=1" Enter
-tmux send-keys -t gpu1 "export HF_TOKEN='$HF_TOKEN'" Enter
-tmux send-keys -t gpu1 "export WORKER_DEVICE=cuda:1" Enter
-tmux send-keys -t gpu1 "export WORKER_ID=thunder_a_gpu1" Enter
-tmux send-keys -t gpu1 "export MASTER_URL=https://<MASTER2_URL>" Enter
-tmux send-keys -t gpu1 "export SELF_URL=https://q5lbf7oe-8001.thundercompute.net" Enter
-tmux send-keys -t gpu1 "uvicorn thunder_worker:app --host 0.0.0.0 --port 8001 2>&1 | tee gpu1.log" Enter
-
-tmux ls
+# Watch model load (~2-3 min on Thunder for fp16 .to(cuda:0))
+tail -f ~/gpu0.log    # Ctrl+C when "Application startup complete" appears
 ```
 
-Expected `tmux ls` shows two sessions, both 1 window. The `--port` numbers
-**must** match the `SELF_URL` ports (8000 with `q5lbf7oe-8000`, 8001 with
-`q5lbf7oe-8001`) — getting these wrong is the most common bug.
-
-Wait for the model to load (~2–4 minutes the first time as ~16GB downloads
-from HuggingFace; subsequent worker launches share the same disk cache):
-
-```bash
-sleep 240
-tail -n 5 ~/gpu0.log
-tail -n 5 ~/gpu1.log
-nvidia-smi --query-gpu=index,memory.used --format=csv
-```
-
-Both logs should end with:
-
-```
-[thunder_a_gpu0] loaded in NN.Ns, device=cuda:0, vram_used=~15800MB
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:8000
-```
-
-`nvidia-smi` should show **both GPUs at ~16 GB** (not both on GPU 0):
-
-```
-0, 16293 MiB
-1, 15871 MiB
-```
-
-If both show on GPU 0 and the other is empty, see "Both workers stuck on
-GPU 0" in Troubleshooting. Once split, exit the SSH session — tmux
-sessions persist server-side regardless:
-
-```bash
-exit
-```
-
-### 6.2 — Instance 1 (workers `thunder_b_gpu0` and `thunder_b_gpu1`)
-
-Identical to Step 6.1 but with `tnr connect 1`, worker IDs `thunder_b_*`,
-and `tn9t67pp` UUID URLs:
-
-```powershell
-tnr connect 1
-```
-
-```bash
-sudo apt-get update          # if you didn't already
-sudo apt-get install -y tmux
-
-export HF_TOKEN=hf_yourtoken_here
-
-tmux new -d -s gpu0
-tmux send-keys -t gpu0 "export PYTHONUNBUFFERED=1" Enter
-tmux send-keys -t gpu0 "export HF_TOKEN='$HF_TOKEN'" Enter
-tmux send-keys -t gpu0 "export WORKER_DEVICE=cuda:0" Enter
-tmux send-keys -t gpu0 "export WORKER_ID=thunder_b_gpu0" Enter
-tmux send-keys -t gpu0 "export MASTER_URL=https://<MASTER1_URL>" Enter
-tmux send-keys -t gpu0 "export SELF_URL=https://tn9t67pp-8000.thundercompute.net" Enter
-tmux send-keys -t gpu0 "uvicorn thunder_worker:app --host 0.0.0.0 --port 8000 2>&1 | tee gpu0.log" Enter
-
-tmux new -d -s gpu1
-tmux send-keys -t gpu1 "export PYTHONUNBUFFERED=1" Enter
-tmux send-keys -t gpu1 "export HF_TOKEN='$HF_TOKEN'" Enter
-tmux send-keys -t gpu1 "export WORKER_DEVICE=cuda:1" Enter
-tmux send-keys -t gpu1 "export WORKER_ID=thunder_b_gpu1" Enter
-tmux send-keys -t gpu1 "export MASTER_URL=https://<MASTER2_URL>" Enter
-tmux send-keys -t gpu1 "export SELF_URL=https://tn9t67pp-8001.thundercompute.net" Enter
-tmux send-keys -t gpu1 "uvicorn thunder_worker:app --host 0.0.0.0 --port 8001 2>&1 | tee gpu1.log" Enter
-```
-
-Wait, verify with the same `tail` + `nvidia-smi`, then `exit`.
+For instance 1, swap `WORKER_ID=thunder_b_gpu0`, `MASTER_URL=<MASTER2_URL>`,
+`SELF_URL=https://tn9t67pp-8000.thundercompute.net`.
 
 ---
 
 ## Step 7 — Verify from the laptop
 
-Each master should now show 1 CPU worker + 2 GPU workers:
+Each master should now show 1 CPU worker + 1 GPU worker:
 
 ```powershell
 curl.exe http://localhost:7001/scheduler/workers
 curl.exe http://localhost:7002/scheduler/workers
 ```
 
-Master1 should list `worker_1_1` (cpu), `thunder_a_gpu0` (gpu),
-`thunder_b_gpu0` (gpu). Master2 lists `worker_2_1`, `thunder_a_gpu1`,
-`thunder_b_gpu1`. All `last_seen_sec_ago` should be < 10.
+Master1 should list `worker_1_1` (cpu) and `thunder_a_gpu0` (gpu).
+Master2 should list `worker_2_1` and `thunder_b_gpu0`. All
+`last_seen_sec_ago` should be < 10. Stale entries from previous
+configurations may also appear; restart the masters
+(`docker compose restart master1 master2`) to clean the registry.
 
 End-to-end through nginx:
 
@@ -440,6 +474,11 @@ Env vars on the Thunder worker:
 | `HF_TOKEN` | required for gated models like Llama | n/a | `hf_xxxx` |
 | `WORKER_API_KEY` | Sent as `X-API-Key` header on heartbeats | (empty) | |
 | `PYTHONUNBUFFERED` | Flush stdout (recommended for live logs) | `1` recommended | |
+| `TEMPERATURE` | Sampling temperature for generation | `0.7` | `0.9` |
+| `TOP_P` | Nucleus sampling cutoff | `0.9` | `0.95` |
+| `BATCH_SIZE` | Max requests coalesced into one `model.generate()` call. Also advertised to the master as the worker's `slots`, so the master sends up to this many concurrent requests per worker | `64` | `128` |
+| `BATCH_WAIT_MS` | After receiving the first request, how long the batcher waits for more requests to arrive before flushing | `30` | `50` |
+| `MASTER_TARGET` | Used by `launch_workers.sh` to pick which `MASTER{1,2}_URL` the worker registers to | `master1` | `master1` or `master2` |
 
 Each worker registers with **one** master (whichever cloudflared URL you
 set as `MASTER_URL`). To shift the symmetric layout, just change which
@@ -545,24 +584,53 @@ ss -tnlp | grep -E ':(8000|8001) '   # confirm both ports free
 
 Then relaunch.
 
-### Both workers stuck on GPU 0 (one GPU shows ~31 GB, the other ~4 MiB)
+### Worker on `cuda:1` hangs / `model.generate` never returns
 
-Either:
+Thunder's "Prototyping" mode CUDA virtualization stalls a second worker
+process on the same instance, even when pinned to a different GPU via
+`WORKER_DEVICE=cuda:1`. Symptoms: `/health` returns OK with
+`active_requests` climbing, but direct curl to `/generate` times out.
 
-1. **Patched `thunder_worker.py` not on this instance.** Check:
-   ```bash
-   grep WORKER_DEVICE ~/thunder_worker.py
-   ```
-   Should match twice (comment + `os.getenv` line). If not, re-run
-   `tnr scp workers/thunder_worker.py 0:` (and `1:`) from the laptop.
+**This is why the default config runs only ONE worker per instance** (on
+`cuda:0`). The second A100 is left idle. We tried various workarounds —
+sequential vs. parallel launch, `BATCH_SIZE` lowering, `pkill -9` resets
+— none cleared the stall reliably. The only fix was rebooting the
+instance, but `sudo reboot` doesn't work on Thunder's container shell
+and `tnr modify` is currently disabled.
 
-2. **`WORKER_DEVICE` env var didn't reach the worker.** The `tmux send-keys`
-   approach is robust, but if you get clever with one-line invocations
-   make sure each `export` is its own line.
+If you need the second GPU on each instance, options:
+- Switch to Thunder "Production" mode (might allow real concurrent CUDA)
+- Use tensor parallelism via vLLM so one process spans both GPUs
+- Move to a different cloud GPU provider
 
-`CUDA_VISIBLE_DEVICES` will *not* fix this on Thunder — their CUDA shim
+### Variables not landing in tmux (`MODEL_NAME=''` / partial env)
+
+Older versions of `launch_workers.sh` used `tmux send-keys` to type each
+`export` line into a session. Under load, individual keystrokes could be
+dropped — we observed `MODEL_NAME` getting eaten on the second worker
+launched on the same instance, leading to `OSError: Repo id ... cannot
+be ''`.
+
+The current `launch_workers.sh` writes `/tmp/gpu0_launch.sh` containing
+all env vars, then `tmux new -d -s gpu0 'bash /tmp/gpu0_launch.sh'` —
+single atomic script execution, no keystroke race. If you ever revert to
+`send-keys`, expect intermittent variable loss.
+
+### `Patched thunder_worker.py not on this instance`
+
+Quick verification:
+
+```bash
+grep -E "WORKER_DEVICE|BATCH_SIZE" ~/thunder_worker.py
+```
+
+Should print at least 4 matches (env var declarations + comments). If
+not, the file is stale — `scripts/redeploy.ps1` re-uploads on every run,
+or use `tnr scp workers/thunder_worker.py 0:` manually.
+
+`CUDA_VISIBLE_DEVICES` will *not* work on Thunder — their CUDA shim
 silently routes everything to the first physical GPU. `WORKER_DEVICE` +
-explicit `model.to("cuda:N")` is required.
+explicit `model.to("cuda:N")` is required for any GPU pinning.
 
 ### `nvidia-smi` shows GPU memory used but "No running processes found"
 
@@ -601,6 +669,8 @@ plenty of headroom for normal request sizes.
 
 ## Appendix — files in this layer
 
-- `thunder_worker.py` — the FastAPI server (self-contained)
-- `thunder_requirements.txt` — pip deps
+- `thunder_worker.py` — the FastAPI server (self-contained, no project imports)
+- `thunder_requirements.txt` — pip deps for the Thunder side
+- `launch_workers.sh` — bash launcher uploaded to each Thunder instance: kills old workers, writes a per-session env script to `/tmp`, kicks off uvicorn under `tmux` (fire-and-forget)
 - `THUNDER_SETUP.md` — this file
+- `../scripts/redeploy.ps1` — laptop-side driver that scps both files to both instances in parallel, runs `launch_workers.sh`, and polls master registries until workers heartbeat
