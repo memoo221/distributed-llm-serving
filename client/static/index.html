@@ -280,6 +280,33 @@
         </div>
       </div>
 
+      <!-- RAG toggle. When ON, the server rewrites target_url's path to
+           /rag/generate and forwards top_k/book_id along with the prompt.
+           UI shows live RAG-service health (green/red dot) so you don't
+           waste a load test against a dead RAG container. -->
+      <div style="margin-top: 14px; padding: 10px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;">
+        <label style="display: flex; align-items: center; gap: 8px; margin: 0; cursor: pointer; color: var(--text); font-size: 13px;">
+          <input type="checkbox" id="useRag" style="width: auto; margin: 0;" />
+          <strong>Use RAG</strong>
+          <span id="ragHealth" style="margin-left: auto; font-size: 11px; color: var(--muted);">checking...</span>
+        </label>
+        <div id="ragControls" style="display: none; margin-top: 10px;">
+          <div class="row">
+            <div>
+              <label for="ragTopK">top_k</label>
+              <input type="number" id="ragTopK" value="3" min="0" max="20" />
+            </div>
+            <div>
+              <label for="ragBookId">book_id <span style="color: var(--muted); font-weight: 400;">(blank = any)</span></label>
+              <input type="number" id="ragBookId" placeholder="" />
+            </div>
+          </div>
+          <div style="margin-top: 6px; color: var(--muted); font-size: 11px;">
+            Rewrites target URL path to <code>/rag/generate</code>. Each request goes through Qdrant retrieval, then to a master.
+          </div>
+        </div>
+      </div>
+
       <label for="prompt">Prompt</label>
       <textarea id="prompt">Write a short haiku about distributed systems.</textarea>
 
@@ -697,7 +724,38 @@ function stopPolling() {
   pollHandle = null;
 }
 
+// --- RAG toggle wiring ---
+// Show/hide the RAG-only controls based on the checkbox state, and poll
+// the RAG service's health so the user knows whether enabling RAG will
+// actually work. The server takes care of the URL rewrite (/generate →
+// /rag/generate) so the Target URL field stays the same regardless.
+function syncRagVisibility() {
+  $("ragControls").style.display = $("useRag").checked ? "block" : "none";
+}
+$("useRag").addEventListener("change", syncRagVisibility);
+syncRagVisibility();
+
+async function loadRagHealth() {
+  const elem = $("ragHealth");
+  try {
+    const data = await api("/api/rag/health");
+    if (data.available) {
+      elem.textContent = "● up";
+      elem.style.color = "var(--ok)";
+    } else {
+      elem.textContent = "● down";
+      elem.style.color = "var(--err)";
+    }
+  } catch (e) {
+    elem.textContent = "● unknown";
+    elem.style.color = "var(--muted)";
+  }
+}
+loadRagHealth();
+setInterval(loadRagHealth, 10000);
+
 $("runBtn").addEventListener("click", async () => {
+  const useRag = $("useRag").checked;
   const body = {
     target_url: $("targetUrl").value.trim(),
     total_requests: parseInt($("totalRequests").value, 10),
@@ -705,7 +763,15 @@ $("runBtn").addEventListener("click", async () => {
     prompt: $("prompt").value,
     max_new_tokens: parseInt($("maxNewTokens").value, 10),
     request_timeout_sec: parseFloat($("timeoutSec").value),
+    use_rag: useRag,
   };
+  if (useRag) {
+    body.top_k = parseInt($("ragTopK").value, 10);
+    const bookIdRaw = $("ragBookId").value.trim();
+    if (bookIdRaw !== "") {
+      body.book_id = parseInt(bookIdRaw, 10);
+    }
+  }
   try {
     $("runBtn").disabled = true;
     const { run_id } = await api("/api/run", {

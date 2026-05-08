@@ -89,6 +89,26 @@ async def post_stop_all() -> dict:
         raise HTTPException(500, str(exc))
 
 
+@app.get("/api/rag/health")
+async def get_rag_health() -> dict:
+    """Quick check whether the RAG service is up.
+
+    The RAG container's /health is exposed via nginx at /rag/health. We
+    proxy through nginx (not the container directly) so this matches the
+    request path the UI's load test will actually use, catching nginx
+    routing problems too.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as http:
+            resp = await http.get("http://localhost:8008/rag/health")
+            return {
+                "available": resp.status_code == 200,
+                "status_code": resp.status_code,
+            }
+    except Exception as exc:
+        return {"available": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
 @app.get("/api/workers")
 async def get_workers() -> dict:
     """Live workers from each master's registry.
@@ -123,17 +143,38 @@ class RunRequest(BaseModel):
     prompt: str = Field(default="Write a short haiku about distributed systems.")
     max_new_tokens: int = Field(default=64, ge=1, le=512)
     request_timeout_sec: float = Field(default=600.0, ge=1.0, le=3600.0)
+    # RAG controls. When use_rag=true the runner POSTs to /rag/generate
+    # instead of /generate (the URL rewrite happens here, not in the UI,
+    # so the UI's target_url field stays simple).
+    use_rag: bool = Field(default=False)
+    top_k: int = Field(default=3, ge=0, le=20)
+    book_id: int | None = Field(default=None)
 
 
 @app.post("/api/run")
 async def post_run(req: RunRequest) -> dict:
+    target_url = req.target_url
+    extra_payload: dict = {}
+    if req.use_rag:
+        # Rewrite the path component to /rag/generate (preserving scheme +
+        # host + port) so the user can flip "Use RAG" without touching the
+        # target URL. /rag/ is the nginx prefix that proxies to the RAG
+        # container's /generate endpoint.
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(target_url)
+        target_url = urlunparse(parsed._replace(path="/rag/generate"))
+        extra_payload["top_k"] = req.top_k
+        if req.book_id is not None:
+            extra_payload["book_id"] = req.book_id
+
     state = runner.start_run(
-        target_url=req.target_url,
+        target_url=target_url,
         total_requests=req.total_requests,
         concurrency=req.concurrency,
         prompt=req.prompt,
         max_new_tokens=req.max_new_tokens,
         request_timeout=req.request_timeout_sec,
+        extra_payload=extra_payload,
     )
     return {"run_id": state.run_id}
 

@@ -39,6 +39,9 @@ class RunState:
     concurrency: int
     prompt: str
     max_new_tokens: int
+    # Extra JSON fields merged into each request body. Used by the RAG path
+    # to pass top_k, book_id, master_id without bloating the core fields.
+    extra_payload: dict[str, Any] = field(default_factory=dict)
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
     completed: int = 0
@@ -133,12 +136,19 @@ async def _fire_one(
     prompt: str,
     max_new_tokens: int,
     index: int,
+    extra_payload: dict[str, Any] | None = None,
 ) -> RequestResult:
     start = time.perf_counter()
+    payload: dict[str, Any] = {"prompt": prompt, "max_new_tokens": max_new_tokens}
+    if extra_payload:
+        # Caller-supplied fields (e.g. RAG's top_k / book_id) win over the
+        # core fields, so a load test can override max_new_tokens per call
+        # if it ever wanted to. Today only the RAG knobs flow through here.
+        payload.update(extra_payload)
     try:
         resp = await client.post(
             target_url,
-            json={"prompt": prompt, "max_new_tokens": max_new_tokens},
+            json=payload,
         )
         latency = time.perf_counter() - start
         if resp.status_code == 200:
@@ -180,7 +190,12 @@ async def _run_load_test(state: RunState, request_timeout: float) -> None:
                 if state.cancelled:
                     return
                 result = await _fire_one(
-                    client, state.target_url, state.prompt, state.max_new_tokens, i
+                    client,
+                    state.target_url,
+                    state.prompt,
+                    state.max_new_tokens,
+                    i,
+                    extra_payload=state.extra_payload,
                 )
                 state.results.append(result)
                 state.completed += 1
@@ -205,6 +220,7 @@ def start_run(
     prompt: str,
     max_new_tokens: int,
     request_timeout: float = 600.0,
+    extra_payload: dict[str, Any] | None = None,
 ) -> RunState:
     run_id = uuid.uuid4().hex[:12]
     state = RunState(
@@ -214,6 +230,7 @@ def start_run(
         concurrency=concurrency,
         prompt=prompt,
         max_new_tokens=max_new_tokens,
+        extra_payload=extra_payload or {},
     )
     _runs[run_id] = state
 
