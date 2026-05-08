@@ -181,3 +181,8 @@ services:
       - "8005:8000"
     restart: unless-stopped
 
+volumes:
+  # Qdrant persistence for ingested embeddings. Without this declaration
+  # docker compose rejects the file with 'undefined volume qdrant_data'.
+  qdrant_data:
+
