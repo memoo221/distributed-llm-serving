@@ -34,13 +34,17 @@ distributed-llm-serving/
 │   └── services/   # config, registry, scheduler, forwarder, models
 ├── workers/        # Worker implementations
 │   ├── worker_router.py / worker_service.py    # Local CPU (Qwen 2.5 0.5B)
-│   ├── thunder_worker.py                       # Remote GPU on Thunder Compute (continuous batching)
-│   ├── thunder_requirements.txt
 │   ├── launch_workers.sh                       # Thunder-side bash launcher (kill old + spawn tmux)
-│   ├── THUNDER_SETUP.md                        # Comprehensive Thunder walkthrough
-│   ├── groq_worker.py / Dockerfile.groq        # Dormant — gated behind --profile groq
-│   ├── kaggle_worker.py / KAGGLE_SETUP.md      # Retired — old Kaggle GPU path
-│   └── inference.py                            # Shared model-loading helpers
+│   ├── thunder/                                # Remote GPU on Thunder Compute
+│   │   ├── thunder_worker.py                   #   continuous batching, BATCH_SIZE=64
+│   │   ├── thunder_requirements.txt
+│   │   └── THUNDER_SETUP.md                    #   comprehensive walkthrough
+│   ├── groq/                                   # Dormant — replaced by Thunder
+│   │   ├── groq_worker.py / Dockerfile.groq
+│   │   └── requirements-groq.txt
+│   └── kaggle/                                 # Retired — old Kaggle GPU path
+│       ├── kaggle_worker.py / inference.py
+│       └── KAGGLE_SETUP.md
 ├── nginx/nginx.conf                            # Layer-7 load balancer config
 ├── client/         # Test UI (FastAPI + HTML)
 │   ├── app.py
@@ -97,7 +101,7 @@ The full Thunder Compute walkthrough — provisioning instances, fixing
 Windows SSH key permissions, `tnr scp` of the worker code, `tnr ports
 forward` for public HTTPS endpoints, two `cloudflared` Quick Tunnels for
 master heartbeats, the `WORKER_DEVICE` patch for GPU pinning, continuous
-batching, and the launch flow — lives in [`workers/THUNDER_SETUP.md`](workers/THUNDER_SETUP.md). [`onboard.md`](onboard.md#thunder-compute-gpu-workers) has a condensed reference with the runtime architecture diagram.
+batching, and the launch flow — lives in [`workers/thunder/THUNDER_SETUP.md`](workers/thunder/THUNDER_SETUP.md). [`onboard.md`](onboard.md#thunder-compute-gpu-workers) has a condensed reference with the runtime architecture diagram.
 
 Day-to-day Thunder redeploys are one command:
 
@@ -106,7 +110,7 @@ Day-to-day Thunder redeploys are one command:
 .\scripts\redeploy.ps1 -Force     # force redeploy (e.g. after editing thunder_worker.py)
 ```
 
-The script pushes [`thunder_worker.py`](workers/thunder_worker.py) and [`launch_workers.sh`](workers/launch_workers.sh) to both instances in parallel, kicks off `bash launch_workers.sh` over `tnr connect`, then polls master registries until both workers heartbeat. Edit the `$Config` block at the top to change `BATCH_SIZE`, cloudflared URLs, or the HF token.
+The script pushes [`thunder_worker.py`](workers/thunder/thunder_worker.py) and [`launch_workers.sh`](workers/launch_workers.sh) to both instances in parallel, kicks off `bash launch_workers.sh` over `tnr connect`, then polls master registries until both workers heartbeat. Edit the `$Config` block at the top to change `BATCH_SIZE`, cloudflared URLs, or the HF token.
 
 In short: each Thunder instance runs ONE FastAPI worker process (on
 `cuda:0`), exposed via `tnr ports forward` HTTPS URLs. `cloudflared` exposes
@@ -155,5 +159,5 @@ See [`onboard.md`](onboard.md) for the full verification flow, the worker API co
 ## Documentation
 
 - [`onboard.md`](onboard.md) — full architecture, Thunder Compute walkthrough, API contract, verification, ports
-- [`workers/THUNDER_SETUP.md`](workers/THUNDER_SETUP.md) — full Thunder Compute walkthrough (provisioning, key permissions, `tnr ports forward`, `cloudflared`, `WORKER_DEVICE` GPU pinning, troubleshooting)
-- [`workers/KAGGLE_SETUP.md`](workers/KAGGLE_SETUP.md) — retired, kept for historical reference
+- [`workers/thunder/THUNDER_SETUP.md`](workers/thunder/THUNDER_SETUP.md) — full Thunder Compute walkthrough (provisioning, key permissions, `tnr ports forward`, `cloudflared`, `WORKER_DEVICE` GPU pinning, troubleshooting)
+- [`workers/kaggle/KAGGLE_SETUP.md`](workers/kaggle/KAGGLE_SETUP.md) — retired, kept for historical reference

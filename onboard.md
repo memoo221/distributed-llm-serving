@@ -21,13 +21,13 @@ Workers are heterogeneous:
 - **CPU workers** load Qwen 2.5 0.5B locally (in-process slot, single-stream).
 - **Thunder GPU workers** run a CUDA-backed FastAPI server on rented [Thunder Compute](https://thundercompute.com) instances, hosting a real GPU model (default: Llama 3.1 8B Instruct). They count as `device_type: "gpu"` for scheduling.
 
-The default cluster shape is **symmetric**: 2 Thunder instances × 1 worker each on `cuda:0` = **2 GPU workers total**, one heartbeating to `master1` and one to `master2`. CPU workers stay 1-per-master. Each instance has a second A100 idle on `cuda:1` — running a second worker per instance was tried and consistently caused CUDA stalls on the second process; see [`workers/THUNDER_SETUP.md`](workers/THUNDER_SETUP.md) for the rationale.
+The default cluster shape is **symmetric**: 2 Thunder instances × 1 worker each on `cuda:0` = **2 GPU workers total**, one heartbeating to `master1` and one to `master2`. CPU workers stay 1-per-master. Each instance has a second A100 idle on `cuda:1` — running a second worker per instance was tried and consistently caused CUDA stalls on the second process; see [`workers/thunder/THUNDER_SETUP.md`](workers/thunder/THUNDER_SETUP.md) for the rationale.
 
 The master's scheduler does threshold-based routing: requests with an estimated token score ≥ 256 go GPU-only; smaller requests prefer GPU while it has headroom, with overflow to CPU via JSQ(2) ([master/services/scheduler.py](master/services/scheduler.py)).
 
 The **client test UI** at `http://localhost:8050` lets you start/stop services, view live worker registry across all masters, run load tests with configurable concurrency, view per-request responses, and export results as CSV.
 
-> **About Groq**: a previous version of this project used hosted Groq inference (`llama-3.1-8b-instant`) as the GPU layer. That code is still present (`workers/groq_worker.py`, `workers/Dockerfile.groq`, dormant compose entries) but is **not started by default**. Thunder replaced Groq because rate limits on the free tier capped throughput at ~3 req/s.
+> **About Groq**: a previous version of this project used hosted Groq inference (`llama-3.1-8b-instant`) as the GPU layer. That code is still present at `workers/groq/` (`groq_worker.py`, `Dockerfile.groq`, `requirements-groq.txt`) but the compose services have been removed. Thunder replaced Groq because rate limits on the free tier capped throughput at ~3 req/s.
 
 ---
 
@@ -48,7 +48,7 @@ The local Docker Compose stack runs the masters, NGINX, and CPU workers. **Thund
 
 ### What runs remotely
 
-- 2 Thunder GPU workers (Llama 3.1 8B) — one per instance on `cuda:0`. Instance 0's worker registers with master1; instance 1's with master2. Continuous batching with `BATCH_SIZE=64` (advertised as `slots` in heartbeats). See [`workers/THUNDER_SETUP.md`](workers/THUNDER_SETUP.md) for the walkthrough.
+- 2 Thunder GPU workers (Llama 3.1 8B) — one per instance on `cuda:0`. Instance 0's worker registers with master1; instance 1's with master2. Continuous batching with `BATCH_SIZE=64` (advertised as `slots` in heartbeats). See [`workers/thunder/THUNDER_SETUP.md`](workers/thunder/THUNDER_SETUP.md) for the walkthrough.
 
 ### Files
 
@@ -56,8 +56,8 @@ The local Docker Compose stack runs the masters, NGINX, and CPU workers. **Thund
 - `nginx/nginx.conf`
 - `master/Dockerfile.master_node`, `master/master_app.py`, `master/services/*` (registry, forwarder, scheduler), `master/routers/master_router.py`
 - `workers/Dockerfile.cpu`, `workers/worker_router.py`, `workers/worker_service.py` — local CPU pipeline
-- `workers/thunder_worker.py`, `workers/thunder_requirements.txt`, `workers/launch_workers.sh`, `workers/THUNDER_SETUP.md` — remote GPU worker + launch script for Thunder Compute
-- `workers/Dockerfile.groq`, `workers/groq_worker.py` — dormant Groq cloud shim (gated behind `--profile groq`)
+- `workers/thunder/thunder_worker.py`, `workers/thunder/thunder_requirements.txt`, `workers/launch_workers.sh`, `workers/thunder/THUNDER_SETUP.md` — remote GPU worker + launch script for Thunder Compute
+- `workers/groq/Dockerfile.groq`, `workers/groq/groq_worker.py` — dormant Groq cloud shim (gated behind `--profile groq`)
 - `client/app.py`, `client/runner.py`, `client/docker_control.py`, `client/static/index.html` — test UI
 - `scripts/redeploy.ps1` — one-shot Thunder worker redeploy (parallel scp + launch + heartbeat verify)
 - `tests/simulate_nginx_lb.py` — nginx-level master LB test
@@ -242,7 +242,7 @@ Open `http://localhost:8050`. The UI has three panels:
 
 The full Thunder walkthrough (provisioning, key permissions, code upload,
 `tnr ports forward`, cloudflared tunnels, the multi-GPU `WORKER_DEVICE`
-patch, and troubleshooting) lives in [`workers/THUNDER_SETUP.md`](workers/THUNDER_SETUP.md).
+patch, and troubleshooting) lives in [`workers/thunder/THUNDER_SETUP.md`](workers/thunder/THUNDER_SETUP.md).
 
 ### What it looks like at runtime
 
@@ -343,7 +343,7 @@ Invoke-RestMethod -Uri "http://localhost:8008/generate" -Method Post `
 ```
 
 For the full step-by-step (CLI install, key permissions fix, model
-gating workarounds, etc.), follow [`workers/THUNDER_SETUP.md`](workers/THUNDER_SETUP.md).
+gating workarounds, etc.), follow [`workers/thunder/THUNDER_SETUP.md`](workers/thunder/THUNDER_SETUP.md).
 
 ---
 
@@ -462,8 +462,8 @@ Response: (same as master /generate)
 - `nginx/nginx.conf` is mounted into the container — config changes don't require an image rebuild.
 - Master and worker images do require rebuilds: `docker compose up -d --build master1 master2`.
 - `.env` must never be committed.
-- The **Kaggle integration** documented in `workers/KAGGLE_SETUP.md` is **retired**.
-- The **Groq integration** (`workers/groq_worker.py`, `workers/Dockerfile.groq`) is dormant — kept in the repo for revertability but not started by default. The `groq_worker_*` services in `docker-compose.yml` are gated behind the `groq` profile. To revive: `docker compose --profile groq up -d` (and ensure `GROQ_API_KEY_1`…`_6` are set in `.env`).
+- The **Kaggle integration** documented in `workers/kaggle/KAGGLE_SETUP.md` is **retired**.
+- The **Groq integration** at `workers/groq/` (`groq_worker.py`, `Dockerfile.groq`, `requirements-groq.txt`) is kept in the repo for revertability but no longer wired into `docker-compose.yml`. To revive: re-add `groq_worker_*` services with `dockerfile: workers/groq/Dockerfile.groq` (and set `GROQ_API_KEY_1`…`_6` in `.env`).
 
 ---
 

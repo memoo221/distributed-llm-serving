@@ -15,9 +15,8 @@ GPU_ROUTE_THRESHOLD: int = int(os.getenv("GPU_ROUTE_THRESHOLD", "256"))
 # 0.85 × GPU_SLOTS = spill threshold. Lower = earlier CPU spillover.
 GPU_BUSY_THRESHOLD: float = float(os.getenv("GPU_BUSY_THRESHOLD", "0.85"))
 
-# Concurrency capacity of a single GPU worker.
-# Groq free tier: 30 RPM ≈ 0.5 req/s; at ~2s avg latency → ~1 slot.
-# Set higher (e.g. 8) if using a paid Groq tier or a real local GPU.
+# Default concurrency capacity of a GPU worker when its heartbeat doesn't
+# advertise one. Real Thunder workers report their own slot count.
 GPU_SLOTS: int = int(os.getenv("GPU_SLOTS", "3"))
 
 # API key the master injects on outbound /generate calls to workers

@@ -10,16 +10,6 @@ import httpx
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# # Try to import GPU monitoring
-# try:
-#     import pynvml
-#     pynvml.nvmlInit()
-#     GPU_MONITORING_AVAILABLE = True
-# except Exception as e:
-#     print(f"[WorkerNode] GPU monitoring unavailable: {e}")
-#     GPU_MONITORING_AVAILABLE = False
-
-
 class WorkerNode:
     """
     Unified worker node that supports both GPU (Groq) and CPU execution.
@@ -345,28 +335,6 @@ class WorkerNode:
             for p in prompts
         ]
     
-    # def get_gpu_stats(self) -> Optional[Dict[str, Any]]:
-    #     """Get GPU memory and utilization stats (if GPU and NVML available)."""
-    #     if "cuda" not in self.device or self.device_idx is None or not GPU_MONITORING_AVAILABLE:
-    #         return None
-        
-    #     try:
-    #         handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_idx)
-    #         mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-    #         util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-            
-    #         return {
-    #             "device": self.device,
-    #             "vram_used_mb": mem_info.used / (1024 ** 2),
-    #             "vram_total_mb": mem_info.total / (1024 ** 2),
-    #             "vram_free_mb": mem_info.free / (1024 ** 2),
-    #             "gpu_utilization": util.gpu,
-    #             "memory_utilization": util.memory,
-    #         }
-    #     except Exception as e:
-    #         print(f"[WorkerNode] Error getting GPU stats: {e}")
-    #         return None
-    
     def device_type(self) -> str:
         """Return coarse device type: 'cuda' or 'cpu' (drops the index)."""
         return "cuda" if "cuda" in self.device else "cpu"
@@ -444,60 +412,4 @@ class WorkerNode:
             "uptime_seconds": uptime,
         }
         
-        # Add GPU stats if available
-        # gpu_stats = self.get_gpu_stats()
-        # if gpu_stats:
-        #     stats.update(gpu_stats)
-        
         return stats
-
-
-# Backward compatibility: legacy WorkerService name
-class WorkerService(WorkerNode):
-    """Legacy alias for WorkerNode (for backward compatibility)."""
-    pass
-
-
-
-
-
-
-
-
-
-
-# _tokenizer = None
-# _model = None
-# _device = None
-
-
-# def load_model(model_path: str):
-#     global _tokenizer, _model, _device
-#     _device = "cuda" if torch.cuda.is_available() else "cpu"
-#     _tokenizer = AutoTokenizer.from_pretrained(model_path)
-#     _model = AutoModelForCausalLM.from_pretrained(
-#         model_path,
-#         torch_dtype=torch.float16 if _device == "cuda" else torch.float32,
-#     ).to(_device)
-#     _model.eval()
-
-
-# def generate_response(question: str, max_new_tokens: int = 256) -> str:
-#     if _model is None or _tokenizer is None:
-#         raise RuntimeError("Model not loaded. Call load_model() first.")
-
-#     messages = [
-#         {"role": "system", "content": "You are a helpful assistant. Answer clearly and concisely in English."},
-#         {"role": "user", "content": question},
-#     ]
-#     prompt = _tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-#     inputs = _tokenizer(prompt, return_tensors="pt").to(_device)
-#     with torch.no_grad():
-#         output_ids = _model.generate(
-#             **inputs,
-#             max_new_tokens=max_new_tokens,
-#             do_sample=False,
-#             pad_token_id=_tokenizer.eos_token_id,
-#         )
-#     new_tokens = output_ids[0][inputs["input_ids"].shape[-1]:]
-#     return _tokenizer.decode(new_tokens, skip_special_tokens=True).strip()

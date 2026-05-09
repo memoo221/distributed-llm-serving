@@ -169,8 +169,8 @@ that no `(I)` (inherited) entries leaked back in.
 From the project root on your laptop:
 
 ```powershell
-tnr scp workers/thunder_worker.py workers/thunder_requirements.txt 0:
-tnr scp workers/thunder_worker.py workers/thunder_requirements.txt 1:
+tnr scp workers/thunder/thunder_worker.py workers/thunder/thunder_requirements.txt 0:
+tnr scp workers/thunder/thunder_worker.py workers/thunder/thunder_requirements.txt 1:
 ```
 
 Both files land in `/home/ubuntu/` on each instance. The worker is
@@ -339,7 +339,7 @@ If something needs to change, force the redeploy:
 
 That will:
 
-1. **Push files** — `tnr scp workers/thunder_worker.py` and
+1. **Push files** — `tnr scp workers/thunder/thunder_worker.py` and
    `workers/launch_workers.sh` to each instance, **in parallel** via
    PowerShell `Start-Job`.
 2. **Run the bash launcher** — pipes the kill-old-then-launch-new script
@@ -626,7 +626,7 @@ grep -E "WORKER_DEVICE|BATCH_SIZE" ~/thunder_worker.py
 
 Should print at least 4 matches (env var declarations + comments). If
 not, the file is stale — `scripts/redeploy.ps1` re-uploads on every run,
-or use `tnr scp workers/thunder_worker.py 0:` manually.
+or use `tnr scp workers/thunder/thunder_worker.py 0:` manually.
 
 `CUDA_VISIBLE_DEVICES` will *not* work on Thunder — their CUDA shim
 silently routes everything to the first physical GPU. `WORKER_DEVICE` +

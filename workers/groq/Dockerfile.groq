@@ -4,11 +4,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY requirements-groq.txt ./requirements-groq.txt
+COPY workers/groq/requirements-groq.txt ./requirements-groq.txt
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 	pip install --upgrade pip setuptools wheel \
 	&& pip install -r requirements-groq.txt
 
 COPY workers ./workers
 
-CMD ["uvicorn", "workers.groq_worker:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "workers.groq.groq_worker:app", "--host", "0.0.0.0", "--port", "8000"]
