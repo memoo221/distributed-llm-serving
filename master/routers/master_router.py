@@ -82,6 +82,18 @@ async def generate(payload: GenerateRequest, request: Request) -> dict[str, Any]
             status_code=502,
             detail={"error": "all_workers_failed", "tried": exc.tried},
         )
+    except HTTPException:
+        # Already a well-formed HTTP error from a downstream layer — re-raise
+        # without re-wrapping so the original status code reaches the client.
+        raise
+    except Exception as exc:
+        # Anything else (raw httpx.HTTPStatusError, JSON decode errors, etc.)
+        # would otherwise be rendered as a generic 500. Surface it as a 502
+        # so the client sees "bad upstream" instead of "master crashed".
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "upstream_failure", "exception": f"{type(exc).__name__}: {exc}"},
+        )
 
     return {
         "response": result.get("answer") or result.get("response"),

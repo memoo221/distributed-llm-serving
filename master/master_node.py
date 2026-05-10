@@ -26,7 +26,7 @@ class MasterRequestTimeout(Exception):
     pass
 
 
-_RETRY_STATUSES = {429, 502, 503, 504}
+_RETRY_STATUSES = {429, 500, 502, 503, 504}
 
 
 @dataclass
@@ -36,7 +36,20 @@ class QueuedRequest:
     request_score: int
     future: asyncio.Future
     deadline_at: float
+    # Workers we've permanently given up on for THIS request (e.g. they
+    # returned a non-retryable HTTP status). Transient transport errors do
+    # NOT add to this set — the registry's failure-cooldown is enough to
+    # skip a flaky worker briefly without burning it for the request lifetime.
     tried_workers: set[str] = field(default_factory=set)
+    # Total dispatch attempts for this request. Bounded to prevent a queue
+    # of always-failing requests from looping forever inside the deadline.
+    attempts: int = 0
+
+
+# Hard cap on per-request dispatches. With 4 workers (2 CPU + 2 GPU) and
+# transient errors that don't blacklist, this gives every worker a couple
+# of chances before we give up.
+_MAX_ATTEMPTS_PER_REQUEST = 6
 
 
 class MasterNode:
@@ -155,6 +168,7 @@ class MasterNode:
                         item.future.set_exception(MasterQueueFull("master queue is full"))
                     continue
 
+                item.attempts += 1
                 self._local_inflight[worker.worker_id] = self._local_inflight.get(worker.worker_id, 0) + 1
                 asyncio.create_task(self._dispatch(item, worker))
 
@@ -225,14 +239,31 @@ class MasterNode:
                 if not item.future.cancelled() and not item.future.done():
                     item.future.set_exception(exc)
 
-        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+        except (
+            # Anything transport-level is transient by assumption — retry.
+            # httpx.TransportError covers TimeoutException, ConnectError,
+            # ReadError, WriteError, RemoteProtocolError, PoolTimeout,
+            # NetworkError. These show up when the master <-> Thunder path
+            # hiccups mid-generation (cloudflared / tnr edge resets, brief
+            # NAT rebinds, ~3s tunnel lag). We do NOT add the worker to
+            # tried_workers here — the registry cooldown briefly skips it,
+            # and it becomes eligible again automatically. With only 2 GPU
+            # workers, permanent blacklisting on every transport hiccup
+            # exhausts the pool fast and forces the request into a long
+            # queue wait that ends in MasterRequestTimeout.
+            httpx.TransportError,
+        ) as exc:
             self._registry.mark_failed(worker.worker_id)
-            item.tried_workers.add(worker.worker_id)
             await self._retry_or_fail(item)
 
         except Exception as exc:
+            # Last-resort: don't surface a raw httpx/json exception to the
+            # client (FastAPI would render it as 500). Convert to AllRetriesFailed
+            # so master_router maps it to a clean 502 with the worker list.
+            from master.services.forwarder import AllRetriesFailed
             if not item.future.cancelled() and not item.future.done():
-                item.future.set_exception(exc)
+                tried = list(item.tried_workers) + [worker.worker_id]
+                item.future.set_exception(AllRetriesFailed(tried))
 
         finally:
             self._local_inflight[worker.worker_id] = max(
@@ -246,8 +277,13 @@ class MasterNode:
         if loop.time() >= item.deadline_at:
             item.future.set_exception(MasterRequestTimeout("timed out in master queue"))
             return
+        if item.attempts >= _MAX_ATTEMPTS_PER_REQUEST:
+            from master.services.forwarder import AllRetriesFailed
+            item.future.set_exception(AllRetriesFailed(list(item.tried_workers)))
+            return
 
-        # Re-enqueue; next tick will pick a different worker.
+        # Re-enqueue; next tick will pick a different worker (or the same one
+        # again once its cooldown expires, for transport-level transients).
         try:
             self._queue.put_nowait(item)
         except asyncio.QueueFull:

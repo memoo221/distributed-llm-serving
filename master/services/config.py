@@ -23,7 +23,7 @@ GPU_SLOTS: int = int(os.getenv("GPU_SLOTS", "3"))
 WORKER_API_KEY: str = os.getenv("WORKER_API_KEY", "")
 
 # Forwarder timeouts (seconds)
-CONNECT_TIMEOUT: float = float(os.getenv("WORKER_CONNECT_TIMEOUT", "2.0"))
+CONNECT_TIMEOUT: float = float(os.getenv("WORKER_CONNECT_TIMEOUT", "10.0"))
 # 120s is enough for batched generate (~5s per batch of 16 prompts × 64 tokens
 # on A100). Anything longer means the worker is hung — fail fast and retry
 # on a healthy peer rather than waiting on a stuck CUDA context.
