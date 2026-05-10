@@ -539,37 +539,41 @@ async function loadLiveWorkers() {
           : w.in_cooldown ? "<span class=\"badge restarting\">cooldown</span>"
           : "<span class=\"badge running\">live</span>";
         const dev = w.device_type === "gpu" ? "<span style=\"color: var(--accent); font-weight:600;\">gpu</span>" : "cpu";
-        // GPU% bar + numeric. CPU workers don't report util — render an em-dash.
+        // GPU column combines util% bar + VRAM into a single compact cell so
+        // the table fits inside the Live Workers panel without horizontal
+        // overflow. CPU workers don't report util — render an em-dash.
         let gpuCell = "<span style=\"color: var(--muted);\">—</span>";
         if (w.gpu_util_pct !== null && w.gpu_util_pct !== undefined) {
           const pct = Math.max(0, Math.min(100, Number(w.gpu_util_pct)));
           const color = pct > 80 ? "var(--err)" : pct > 50 ? "var(--accent)" : "var(--ok)";
-          gpuCell = `<div style="display:flex; align-items:center; gap:6px;">
-            <div style="flex:1; height:6px; background:var(--panel-2); border-radius:3px; overflow:hidden; min-width:50px;">
-              <div style="height:100%; width:${pct}%; background:${color};"></div>
-            </div>
-            <span style="font-family: ui-monospace, monospace; font-size: 11px; min-width:36px; text-align:right;">${pct.toFixed(0)}%</span>
-          </div>`;
+          const vramTxt = (w.vram_used_mb !== null && w.vram_used_mb !== undefined)
+            ? ` · ${(w.vram_used_mb / 1024).toFixed(1)}GB`
+            : "";
+          gpuCell = `
+            <div style="display:flex; align-items:center; gap:6px; min-width:0;">
+              <div style="flex:1 1 0; min-width:24px; height:6px; background:var(--panel-2); border-radius:3px; overflow:hidden;">
+                <div style="height:100%; width:${pct}%; background:${color};"></div>
+              </div>
+              <span style="font-family: ui-monospace, monospace; font-size: 11px; white-space: nowrap;">${pct.toFixed(0)}%${vramTxt}</span>
+            </div>`;
         }
-        const vram = (w.vram_used_mb !== null && w.vram_used_mb !== undefined)
-          ? `${(w.vram_used_mb / 1024).toFixed(1)} GB`
-          : "<span style=\"color: var(--muted);\">—</span>";
         return `<tr>
-          <td>${w.worker_id}</td>
+          <td style="word-break: break-all;">${w.worker_id}</td>
           <td>${dev}</td>
           <td>${dot}</td>
-          <td>${w.last_seen_sec_ago}s</td>
-          <td>${w.active_requests}/${w.slots}</td>
-          <td style="min-width:120px;">${gpuCell}</td>
-          <td>${vram}</td>
+          <td style="white-space: nowrap;">${w.last_seen_sec_ago}s</td>
+          <td style="white-space: nowrap;">${w.active_requests}/${w.slots}</td>
+          <td style="width: 32%;">${gpuCell}</td>
         </tr>`;
       }).join("");
       return `<div class="breakdown-block" style="margin-bottom:8px;">
         <h3>${m.master_id}</h3>
-        <table style="margin-top:4px;">
-          <thead><tr><th>worker</th><th>type</th><th>state</th><th>last seen</th><th>load</th><th>gpu</th><th>vram</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
+        <div style="overflow-x: auto;">
+          <table style="margin-top:4px; table-layout: auto;">
+            <thead><tr><th>worker</th><th>type</th><th>state</th><th>last seen</th><th>load</th><th>gpu / vram</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
       </div>`;
     });
     elem.innerHTML = blocks.join("");
