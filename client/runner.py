@@ -67,6 +67,21 @@ class RunState:
             return round(latencies[idx], 3)
 
         throughput = round(self.completed / elapsed, 2) if elapsed > 0 else 0.0
+
+        # Latency-over-time series for the UI chart. We index by request order
+        # (r.index) so the x-axis is stable even as more results stream in.
+        # Downsample to <=200 points so the polling payload stays cheap.
+        succeeded_results = [r for r in self.results if r.status_code == 200]
+        succeeded_results.sort(key=lambda r: r.index)
+        if succeeded_results:
+            step = max(1, len(succeeded_results) // 200)
+            latency_series = [
+                {"i": r.index, "latency_sec": round(r.latency_sec, 3)}
+                for r in succeeded_results[::step]
+            ]
+        else:
+            latency_series = []
+
         return {
             "run_id": self.run_id,
             "target_url": self.target_url,
@@ -78,6 +93,7 @@ class RunState:
             "in_flight": max(0, min(self.concurrency, self.total_requests - self.completed)),
             "elapsed_sec": round(elapsed, 2),
             "throughput_rps": throughput,
+            "latency_series": latency_series,
             "p50_sec": pct(0.50),
             "p95_sec": pct(0.95),
             "p99_sec": pct(0.99),

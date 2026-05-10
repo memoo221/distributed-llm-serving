@@ -108,6 +108,8 @@ async def scheduler_debug(request: Request) -> dict[str, Any]:
                 "queue_depth": w.queue_depth,
                 "effective_load": round(w.effective_load, 3),
                 "slots": w.slots,
+                "gpu_util_pct": w.gpu_util_pct,
+                "vram_used_mb": w.raw.get("vram_used_mb") if w.raw else None,
                 "last_seen_sec_ago": round(now - w.last_seen_monotonic, 1),
                 "in_cooldown": now < w.failure_cooldown_until,
             }

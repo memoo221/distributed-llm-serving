@@ -37,6 +37,32 @@ from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
+async def _sample_gpu_stats(gpu_index: int) -> tuple[float | None, float | None]:
+    """Shell out to nvidia-smi for util% and used VRAM (MB) on a single GPU.
+
+    We use the subprocess (not pynvml) because Thunder Compute's virtualized
+    CUDA layer is known to interfere with low-level NVML calls but
+    `nvidia-smi --query-gpu=...` works reliably on those instances. Returns
+    (None, None) if nvidia-smi is missing or the call fails for any reason —
+    the worker stays healthy, the UI just shows "—" for that field.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "nvidia-smi",
+            f"--id={gpu_index}",
+            "--query-gpu=utilization.gpu,memory.used",
+            "--format=csv,noheader,nounits",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+        line = out.decode().strip().splitlines()[0]
+        util_str, mem_str = [x.strip() for x in line.split(",")]
+        return float(util_str), float(mem_str)
+    except Exception:
+        return None, None
+
+
 # Use `or default` instead of os.getenv(key, default) — the latter returns ""
 # when the var is set-but-empty, which has bitten us when launch_workers.sh
 # accidentally let MODEL_NAME='' through. `or` falls back to default for
@@ -106,8 +132,18 @@ async def heartbeat_loop() -> None:
         return
 
     headers = {"X-API-Key": WORKER_API_KEY} if WORKER_API_KEY else {}
+
+    gpu_index = None
+    if _device.startswith("cuda"):
+        gpu_index = int(_device.split(":", 1)[1]) if ":" in _device else 0
+
     async with httpx.AsyncClient(timeout=5.0) as http:
         while True:
+            gpu_util_pct = None
+            vram_used_mb = None
+            if gpu_index is not None:
+                gpu_util_pct, vram_used_mb = await _sample_gpu_stats(gpu_index)
+
             payload = {
                 "worker_id": WORKER_ID,
                 "url": SELF_URL,
@@ -115,6 +151,8 @@ async def heartbeat_loop() -> None:
                 "active_requests": _snapshot_active(),
                 "queue_depth": 0,
                 "slots": BATCH_SIZE,
+                "gpu_util_pct": gpu_util_pct,
+                "vram_used_mb": vram_used_mb,
                 "timestamp": time.time(),
             }
             try:
