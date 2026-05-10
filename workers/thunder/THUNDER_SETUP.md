@@ -22,7 +22,7 @@ adapts — just edit the `$Config.Instances` list.
 ## Architecture
 
 ```
-Your laptop (NAT'd)                                  Thunder instance A (id 0, uuid gaxwh8fq)
+Your laptop (NAT'd)                                  Thunder instance A (id 0, uuid nekld4ou)
 ┌──────────────────────────────────────────┐        ┌─────────────────────────────────────────┐
 │ docker:                                  │        │ uvicorn :8000  thunder_worker.py        │
 │   nginx :8008                            │        │   loads Llama 3.1 8B on cuda:0          │
@@ -31,12 +31,12 @@ Your laptop (NAT'd)                                  Thunder instance A (id 0, u
 │   cpu_worker_1_1, cpu_worker_2_1         │        │                                         │
 │                                          │        │   port 8000 exposed via                 │
 │ host processes:                          │        │   tnr ports forward → HTTPS at          │
-│   client UI :8050                        │  ◄─────┤   https://gaxwh8fq-8000.thundercompute.net
+│   client UI :8050                        │  ◄─────┤   https://nekld4ou-8000.thundercompute.net
 │   cloudflared :7001 → trycloudflare URL  │        │                                         │
 │   cloudflared :7002 → trycloudflare URL  │        │   heartbeats to MASTER1_URL             │
 └──────────────────────────────────────────┘        └─────────────────────────────────────────┘
 
-                                                     Thunder instance B (id 1, uuid xcidc8hb)
+                                                     Thunder instance B (id 1, uuid sr46tweb)
                                                      ┌─────────────────────────────────────────┐
                                                      │ same pattern as instance A              │
                                                      │ port 8000 → cuda:0                      │
@@ -107,7 +107,7 @@ You also need:
   ```powershell
   tnr status
   ```
-  Note the `ID` and `UUID` for each (e.g. `0 / gaxwh8fq`, `1 / xcidc8hb`)
+  Note the `ID` and `UUID` for each (e.g. `0 / nekld4ou`, `1 / sr46tweb`)
   and confirm `Status: RUNNING`.
 
 - **HuggingFace token** with access to the model you want to load. The
@@ -137,7 +137,7 @@ will fail with `bad permissions`. Lock them down once:
 # Replace adam\adam with the output of `whoami` on your machine
 $user = "$(whoami)"
 
-foreach ($id in @("gaxwh8fq", "xcidc8hb")) {
+foreach ($id in @("nekld4ou", "sr46tweb")) {
     $key = "$env:USERPROFILE\.thunder\keys\$id"
     icacls $key /reset
     icacls $key /inheritance:r
@@ -148,14 +148,14 @@ foreach ($id in @("gaxwh8fq", "xcidc8hb")) {
 Verify each shows **only** your user with `(R)` and no inherited entries:
 
 ```powershell
-icacls "$env:USERPROFILE\.thunder\keys\gaxwh8fq"
-icacls "$env:USERPROFILE\.thunder\keys\xcidc8hb"
+icacls "$env:USERPROFILE\.thunder\keys\nekld4ou"
+icacls "$env:USERPROFILE\.thunder\keys\sr46tweb"
 ```
 
 Expected:
 
 ```
-C:\Users\adamt\.thunder\keys\gaxwh8fq adam\adam:(R)
+C:\Users\adamt\.thunder\keys\nekld4ou adam\adam:(R)
 Successfully processed 1 files; Failed processing 0 files
 ```
 
@@ -229,10 +229,10 @@ Once added these are **persistent** — they survive instance reboots and
 do **not** require any open SSH session. The CLI prints URLs of the form:
 
 ```
-https://gaxwh8fq-8000.thundercompute.net
-https://gaxwh8fq-8001.thundercompute.net
-https://xcidc8hb-8000.thundercompute.net
-https://xcidc8hb-8001.thundercompute.net
+https://nekld4ou-8000.thundercompute.net
+https://nekld4ou-8001.thundercompute.net
+https://sr46tweb-8000.thundercompute.net
+https://sr46tweb-8001.thundercompute.net
 ```
 
 Right now those URLs return 502 / connection-refused because no worker is
@@ -302,8 +302,8 @@ $Config = @{
     BatchSize  = 64
     ModelName  = "meta-llama/Llama-3.1-8B-Instruct"
     Instances = @(
-        @{ Id = 0; Uuid = "gaxwh8fq"; WorkerPrefix = "thunder_a"; MasterTarget = "master1" },
-        @{ Id = 1; Uuid = "xcidc8hb"; WorkerPrefix = "thunder_b"; MasterTarget = "master2" }
+        @{ Id = 0; Uuid = "nekld4ou"; WorkerPrefix = "thunder_a"; MasterTarget = "master1" },
+        @{ Id = 1; Uuid = "sr46tweb"; WorkerPrefix = "thunder_b"; MasterTarget = "master2" }
     )
 }
 ```
@@ -398,7 +398,7 @@ export WORKER_DEVICE='cuda:0'
 export BATCH_SIZE='64'
 export WORKER_ID='thunder_a_gpu0'
 export MASTER_URL='https://<MASTER1_URL>'
-export SELF_URL='https://gaxwh8fq-8000.thundercompute.net'
+export SELF_URL='https://nekld4ou-8000.thundercompute.net'
 export MODEL_NAME='meta-llama/Llama-3.1-8B-Instruct'
 cd /home/ubuntu
 exec uvicorn thunder_worker:app --host 0.0.0.0 --port 8000 2>&1 | tee /home/ubuntu/gpu0.log
@@ -411,7 +411,7 @@ tail -f ~/gpu0.log    # Ctrl+C when "Application startup complete" appears
 ```
 
 For instance 1, swap `WORKER_ID=thunder_b_gpu0`, `MASTER_URL=<MASTER2_URL>`,
-`SELF_URL=https://xcidc8hb-8000.thundercompute.net`.
+`SELF_URL=https://sr46tweb-8000.thundercompute.net`.
 
 ---
 
@@ -468,7 +468,7 @@ Env vars on the Thunder worker:
 | `MODEL_NAME` | HF Hub id or local path | `meta-llama/Llama-3.1-8B-Instruct` | `Qwen/Qwen2.5-7B-Instruct` |
 | `WORKER_ID` | Heartbeat identity (must be unique per worker) | `thunder_worker_1` | `thunder_a_gpu0` |
 | `WORKER_DEVICE` | Pin worker to a specific GPU | `cuda` (or `cpu`) | `cuda:0`, `cuda:1` |
-| `SELF_URL` | URL the master uses to call back | `http://localhost:8000` | `https://gaxwh8fq-8000.thundercompute.net` |
+| `SELF_URL` | URL the master uses to call back | `http://localhost:8000` | `https://nekld4ou-8000.thundercompute.net` |
 | `MASTER_URL` | Heartbeat target (cloudflared URL) | (empty — heartbeats skipped) | `https://wherever-...trycloudflare.com` |
 | `HEARTBEAT_INTERVAL` | seconds between heartbeats | `5` | |
 | `HF_TOKEN` | required for gated models like Llama | n/a | `hf_xxxx` |

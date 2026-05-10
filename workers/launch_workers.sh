@@ -6,7 +6,7 @@
 #   HF_TOKEN          HuggingFace token with model access
 #   MASTER1_URL       cloudflared URL of master1
 #   MASTER2_URL       cloudflared URL of master2
-#   UUID_PREFIX       Thunder instance UUID, e.g. gaxwh8fq
+#   UUID_PREFIX       Thunder instance UUID, e.g. nekld4ou
 #   WORKER_PREFIX     thunder_a or thunder_b (matches the instance)
 # Optional:
 #   BATCH_SIZE        Worker batching size + advertised slots (default: 8)
