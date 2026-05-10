@@ -20,6 +20,12 @@ class WorkerState:
     @property
     def slots(self) -> int:
         from master.services.config import GPU_SLOTS
+        # Workers can advertise their own concurrency capacity in the heartbeat
+        # (e.g. a batched GPU worker exposing BATCH_SIZE). Fall back to global
+        # defaults: GPU_SLOTS for gpu, 1 for cpu.
+        advertised = self.raw.get("slots") if self.raw else None
+        if isinstance(advertised, int) and advertised > 0:
+            return advertised
         return GPU_SLOTS if self.device_type == "gpu" else 1
 
     @property

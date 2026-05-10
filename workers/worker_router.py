@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from workers.worker_service import WorkerNode
-from workers.inference import generate_response
+from workers.kaggle.inference import generate_response
 
 MODEL_PATH = os.getenv(
     "MODEL_PATH",

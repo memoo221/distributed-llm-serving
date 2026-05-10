@@ -3,7 +3,7 @@ Smoke test for WorkerNode.
 
 Exercises the two device paths end-to-end:
 - cpu:  loads a local HF model, runs generate() and generate_batch()
-- cuda: routes through a remote Groq worker (workers/groq_worker.py /generate)
+- cuda: routes through a remote GPU worker (workers/thunder/thunder_worker.py /generate)
 
 Run from project root:
 

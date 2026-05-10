@@ -13,3 +13,4 @@ models/qwen2.5-0.5b/
 models/*.bin
 models/*.safetensors
 CLAUDE.md
+scripts/redeploy.ps1

@@ -1,0 +1,875 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>distributed-llm-serving — test UI</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1f2330;
+    --border: #2a2f3d;
+    --text: #e6e8ee;
+    --muted: #9aa3b2;
+    --accent: #5b8def;
+    --ok: #3ddc97;
+    --warn: #ffb454;
+    --err: #ff6b6b;
+    --running: #6cb1ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  main {
+    display: grid;
+    grid-template-columns: 360px 1fr;
+    gap: 16px;
+    padding: 16px;
+    max-width: 1600px;
+    margin: 0 auto;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .panel h2 {
+    margin: 0 0 12px;
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+  }
+  label {
+    display: block;
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 4px;
+    margin-top: 10px;
+  }
+  input[type="text"], input[type="number"], textarea {
+    width: 100%;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    color: var(--text);
+    font: inherit;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px;
+  }
+  input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 60px; }
+  button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:hover { filter: brightness(1.1); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.ghost {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+    font-weight: 500;
+  }
+  button.danger { background: var(--err); }
+  button.small { padding: 4px 8px; font-size: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > * { flex: 1; }
+
+  .service-list { display: flex; flex-direction: column; gap: 6px; }
+  .service {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    gap: 8px;
+  }
+  .service .name {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+  }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .badge.running { background: rgba(61, 220, 151, 0.15); color: var(--ok); }
+  .badge.exited, .badge.stopped, .badge.unknown { background: rgba(154, 163, 178, 0.15); color: var(--muted); }
+  .badge.restarting, .badge.starting { background: rgba(255, 180, 84, 0.15); color: var(--warn); }
+  .service-actions { display: flex; gap: 6px; }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .stat {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+  }
+  .stat .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .stat .value { font-size: 20px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .stat .value.ok { color: var(--ok); }
+  .stat .value.err { color: var(--err); }
+
+  .progress {
+    height: 8px;
+    background: var(--panel-2);
+    border-radius: 4px;
+    overflow: hidden;
+    margin: 8px 0 16px;
+  }
+  .progress-bar {
+    height: 100%;
+    background: var(--accent);
+    width: 0%;
+    transition: width 0.2s ease;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  th, td {
+    text-align: left;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; }
+  tr:hover td { background: var(--panel-2); }
+  td.status-200 { color: var(--ok); }
+  td.status-bad { color: var(--err); }
+
+  tr.log-row { cursor: pointer; }
+  td.log-cell {
+    max-width: 460px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  tr.log-row.expanded td.log-cell {
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-width: 460px;
+  }
+
+  .breakdown {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  .breakdown-block {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+  }
+  .breakdown-block h3 { margin: 0 0 6px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 500; }
+  .kv { display: flex; justify-content: space-between; font-family: ui-monospace, monospace; font-size: 12px; padding: 2px 0; }
+  .kv .k { color: var(--muted); }
+
+  .toast {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 14px;
+    max-width: 400px;
+    z-index: 100;
+    display: none;
+  }
+  .toast.show { display: block; }
+  .toast.err { border-color: var(--err); }
+  .empty { color: var(--muted); font-style: italic; padding: 12px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>distributed-llm-serving</h1>
+  <span class="sub">test UI · localhost:8050</span>
+</header>
+
+<main>
+  <!-- LEFT: nodes + test config -->
+  <div>
+    <div class="panel" style="margin-bottom: 16px;">
+      <h2>Nodes
+        <span style="float:right; margin-top:-4px; display:inline-flex; gap:6px;">
+          <button id="startAllServices" class="small">Start all</button>
+          <button id="stopAllServices" class="danger small">Stop all</button>
+          <button id="refreshServices" class="ghost small">Refresh</button>
+        </span>
+      </h2>
+      <div id="services" class="service-list">
+        <div class="empty">Loading…</div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom: 16px;">
+      <h2>Live Workers
+        <span style="float:right; margin-top:-4px; color: var(--muted); font-weight: 400; font-size: 11px; text-transform: none; letter-spacing: 0;">
+          (from master registries · auto-refresh)
+        </span>
+      </h2>
+      <div id="liveWorkers">
+        <div class="empty">Loading…</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Run Load Test</h2>
+      <label for="targetUrl">Target URL</label>
+      <input type="text" id="targetUrl" value="http://localhost:8008/generate" />
+
+      <div class="row">
+        <div>
+          <label for="totalRequests">Requests</label>
+          <input type="number" id="totalRequests" value="100" min="1" />
+        </div>
+        <div>
+          <label for="concurrency">Concurrency</label>
+          <input type="number" id="concurrency" value="20" min="1" />
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label for="maxNewTokens">max_new_tokens</label>
+          <input type="number" id="maxNewTokens" value="64" min="1" max="512" />
+        </div>
+        <div>
+          <label for="timeoutSec">Timeout (s)</label>
+          <input type="number" id="timeoutSec" value="600" min="1" />
+        </div>
+      </div>
+
+      <!-- RAG toggle. When ON, the server rewrites target_url's path to
+           /rag/generate and forwards top_k/book_id along with the prompt.
+           UI shows live RAG-service health (green/red dot) so you don't
+           waste a load test against a dead RAG container. -->
+      <div style="margin-top: 14px; padding: 10px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;">
+        <label style="display: flex; align-items: center; gap: 8px; margin: 0; cursor: pointer; color: var(--text); font-size: 13px;">
+          <input type="checkbox" id="useRag" style="width: auto; margin: 0;" />
+          <strong>Use RAG</strong>
+          <span id="ragHealth" style="margin-left: auto; font-size: 11px; color: var(--muted);">checking...</span>
+        </label>
+        <div id="ragControls" style="display: none; margin-top: 10px;">
+          <div class="row">
+            <div>
+              <label for="ragTopK">top_k</label>
+              <input type="number" id="ragTopK" value="3" min="0" max="20" />
+            </div>
+            <div>
+              <label for="ragBookId">book_id <span style="color: var(--muted); font-weight: 400;">(blank = any)</span></label>
+              <input type="number" id="ragBookId" placeholder="" />
+            </div>
+          </div>
+          <div style="margin-top: 6px; color: var(--muted); font-size: 11px;">
+            Rewrites target URL path to <code>/rag/generate</code>. Each request goes through Qdrant retrieval, then to a master.
+          </div>
+        </div>
+      </div>
+
+      <label for="prompt">Prompt</label>
+      <textarea id="prompt">Write a short haiku about distributed systems.</textarea>
+
+      <div class="row" style="margin-top: 16px;">
+        <button id="runBtn">Run</button>
+        <button id="cancelBtn" class="danger" disabled>Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: live results -->
+  <div>
+    <div class="panel">
+      <h2>Run Status <span id="runIdLabel" style="color: var(--muted); font-weight: 400; font-family: ui-monospace, monospace; font-size: 11px;"></span></h2>
+
+      <div class="stats">
+        <div class="stat">
+          <div class="label">Completed</div>
+          <div class="value" id="statCompleted">0 / 0</div>
+        </div>
+        <div class="stat">
+          <div class="label">Succeeded</div>
+          <div class="value ok" id="statSucceeded">0</div>
+        </div>
+        <div class="stat">
+          <div class="label">Failed</div>
+          <div class="value err" id="statFailed">0</div>
+        </div>
+        <div class="stat">
+          <div class="label">Throughput</div>
+          <div class="value" id="statThroughput">— req/s</div>
+        </div>
+        <div class="stat">
+          <div class="label">Elapsed</div>
+          <div class="value" id="statElapsed">0s</div>
+        </div>
+        <div class="stat">
+          <div class="label">p50</div>
+          <div class="value" id="statP50">—</div>
+        </div>
+        <div class="stat">
+          <div class="label">p95</div>
+          <div class="value" id="statP95">—</div>
+        </div>
+        <div class="stat">
+          <div class="label">p99</div>
+          <div class="value" id="statP99">—</div>
+        </div>
+      </div>
+
+      <div class="progress"><div id="progressBar" class="progress-bar"></div></div>
+
+      <div class="breakdown">
+        <div class="breakdown-block">
+          <h3>By Worker</h3>
+          <div id="workerCounts" class="empty">no data yet</div>
+        </div>
+        <div class="breakdown-block">
+          <h3>By Master / Status</h3>
+          <div id="masterCounts" class="empty">no data yet</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top: 16px;">
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+        <h2 style="margin:0;">Logs <span id="logsMode" style="color: var(--muted); font-weight: 400; font-size: 11px; text-transform: none; letter-spacing: 0;">live tail (last 50)</span></h2>
+        <div class="row" style="flex: 0 0 auto; gap:6px;">
+          <button id="toggleLogsBtn" class="ghost small" disabled>Show all</button>
+          <button id="exportCsvBtn" class="ghost small" disabled>Export CSV</button>
+        </div>
+      </div>
+      <div style="max-height: 420px; overflow-y: auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Status</th>
+              <th>Latency (s)</th>
+              <th>Worker</th>
+              <th>Master</th>
+              <th>Response / Error</th>
+            </tr>
+          </thead>
+          <tbody id="recentBody">
+            <tr><td colspan="6" class="empty">no requests yet</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div style="margin-top: 6px; color: var(--muted); font-size: 11px;">
+        Click any row to expand the full response.
+      </div>
+    </div>
+  </div>
+</main>
+
+<div id="toast" class="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let currentRunId = null;
+let pollHandle = null;
+// Logs panel: when true, renders the full result list from /results;
+// when false (default), renders the live tail (last 50) from the snapshot.
+let showAllLogs = false;
+// Local elapsed-time ticker. The server's elapsed_sec only updates when we
+// poll, so under load it looks frozen between ticks. We track the run's
+// start wall-clock time client-side and recompute elapsed every 200ms.
+// Once the run finishes we freeze at the server-reported finished elapsed.
+let runStartMs = null;
+let runFrozenElapsedSec = null;
+let elapsedTickHandle = null;
+// Skip repainting the snapshot when nothing changed. Counter-based:
+// if completed didn't move since last paint, the only thing that would
+// change is elapsed (handled by the local ticker) — so we can skip the
+// expensive renderKV / table repaint.
+let lastPaintedCompleted = -1;
+
+function toast(msg, isErr = false) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.toggle("err", !!isErr);
+  t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 3500);
+}
+
+async function api(path, opts = {}) {
+  const resp = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...opts,
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`${resp.status} ${text}`);
+  }
+  return resp.json();
+}
+
+async function loadServices() {
+  const list = $("services");
+  list.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const { services } = await api("/api/services");
+    if (!services.length) {
+      list.innerHTML = '<div class="empty">no services defined</div>';
+      return;
+    }
+    list.innerHTML = "";
+    for (const s of services) {
+      const row = document.createElement("div");
+      row.className = "service";
+      const state = (s.state || "stopped").toLowerCase();
+      row.innerHTML = `
+        <div>
+          <div class="name">${s.name}</div>
+          <span class="badge ${state}">${state}</span>
+        </div>
+        <div class="service-actions">
+          <button class="ghost small" data-action="start" data-name="${s.name}">Start</button>
+          <button class="ghost small" data-action="stop" data-name="${s.name}">Stop</button>
+        </div>
+      `;
+      list.appendChild(row);
+    }
+  } catch (e) {
+    list.innerHTML = `<div class="empty">error: ${e.message}</div>`;
+  }
+}
+
+async function serviceAction(name, action) {
+  try {
+    toast(`${action} ${name}…`);
+    await api(`/api/services/${action}`, {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+    toast(`${action} ${name} ok`);
+    loadServices();
+  } catch (e) {
+    toast(`${action} ${name} failed: ${e.message}`, true);
+  }
+}
+
+$("services").addEventListener("click", (ev) => {
+  const btn = ev.target.closest("button[data-action]");
+  if (!btn) return;
+  serviceAction(btn.dataset.name, btn.dataset.action);
+});
+
+$("refreshServices").addEventListener("click", () => {
+  loadServices();
+  loadLiveWorkers();
+});
+
+async function loadLiveWorkers() {
+  const elem = $("liveWorkers");
+  try {
+    const { masters } = await api("/api/workers");
+    if (!masters.length) {
+      elem.innerHTML = '<div class="empty">no masters configured</div>';
+      return;
+    }
+    const blocks = masters.map((m) => {
+      if (!m.reachable) {
+        return `<div class="breakdown-block" style="margin-bottom:8px;">
+          <h3>${m.master_id} · <span style="color: var(--err);">unreachable</span></h3>
+          <div class="empty" style="text-align:left; padding:4px 0;">${m.error || "no response"}</div>
+        </div>`;
+      }
+      if (!m.workers.length) {
+        return `<div class="breakdown-block" style="margin-bottom:8px;">
+          <h3>${m.master_id} · <span style="color: var(--muted);">no workers</span></h3>
+          <div class="empty" style="text-align:left; padding:4px 0;">no workers heartbeating yet</div>
+        </div>`;
+      }
+      const rows = m.workers.map((w) => {
+        const stale = w.last_seen_sec_ago > 15;
+        const dot = stale ? "<span class=\"badge stopped\">stale</span>"
+          : w.in_cooldown ? "<span class=\"badge restarting\">cooldown</span>"
+          : "<span class=\"badge running\">live</span>";
+        const dev = w.device_type === "gpu" ? "<span style=\"color: var(--accent); font-weight:600;\">gpu</span>" : "cpu";
+        return `<tr>
+          <td>${w.worker_id}</td>
+          <td>${dev}</td>
+          <td>${dot}</td>
+          <td>${w.last_seen_sec_ago}s</td>
+          <td>${w.active_requests}/${w.slots}</td>
+        </tr>`;
+      }).join("");
+      return `<div class="breakdown-block" style="margin-bottom:8px;">
+        <h3>${m.master_id}</h3>
+        <table style="margin-top:4px;">
+          <thead><tr><th>worker</th><th>type</th><th>state</th><th>last seen</th><th>load</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+    });
+    elem.innerHTML = blocks.join("");
+  } catch (e) {
+    elem.innerHTML = `<div class="empty">error: ${e.message}</div>`;
+  }
+}
+
+// Auto-refresh live workers every 3s. Cheap (one parallel fetch per master).
+setInterval(loadLiveWorkers, 3000);
+loadLiveWorkers();
+
+// Expand/collapse a log row on click. Uses event delegation so it survives
+// the polling re-renders.
+$("recentBody").addEventListener("click", (ev) => {
+  const row = ev.target.closest("tr.log-row");
+  if (!row) return;
+  const cell = row.querySelector("td.log-cell");
+  if (!cell) return;
+  if (row.classList.toggle("expanded")) {
+    cell.textContent = row.dataset.full || cell.textContent;
+  } else {
+    // Re-truncate
+    const full = row.dataset.full || "";
+    const shrunk = full.replace(/\s+/g, " ").slice(0, 90);
+    cell.textContent = shrunk + (full.length > 90 ? "…" : "");
+  }
+});
+
+$("startAllServices").addEventListener("click", async () => {
+  const btn = $("startAllServices");
+  const prev = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Starting…";
+  try {
+    toast("starting all services (may take a minute on first build)…");
+    await api("/api/services/start-all", { method: "POST" });
+    toast("all services started");
+    loadServices();
+  } catch (e) {
+    toast(`start all failed: ${e.message}`, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
+  }
+});
+
+$("stopAllServices").addEventListener("click", async () => {
+  if (!confirm("Stop ALL services defined in docker-compose.yml?")) return;
+  const btn = $("stopAllServices");
+  const prev = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Stopping…";
+  try {
+    toast("stopping all services…");
+    await api("/api/services/stop-all", { method: "POST" });
+    toast("all services stopped");
+    loadServices();
+  } catch (e) {
+    toast(`stop all failed: ${e.message}`, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
+  }
+});
+
+function fmtNum(n) {
+  if (n === null || n === undefined) return "—";
+  return n.toString();
+}
+
+function renderKV(elem, obj) {
+  const entries = Object.entries(obj || {});
+  if (!entries.length) {
+    elem.innerHTML = '<div class="empty">no data yet</div>';
+    elem.classList.add("empty");
+    return;
+  }
+  elem.classList.remove("empty");
+  elem.innerHTML = entries
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `<div class="kv"><span class="k">${k}</span><span>${v}</span></div>`)
+    .join("");
+}
+
+function renderSnapshot(s) {
+  // If finished, freeze the server-reported elapsed and stop the local ticker.
+  if (s.finished || s.cancelled) {
+    runFrozenElapsedSec = s.elapsed_sec ?? 0;
+    if (elapsedTickHandle) { clearInterval(elapsedTickHandle); elapsedTickHandle = null; }
+    $("statElapsed").textContent = `${runFrozenElapsedSec}s`;
+  }
+
+  // Skip the expensive bits if nothing changed since last paint. The local
+  // elapsed ticker still updates the elapsed stat, so the UI doesn't look
+  // stuck even when we skip here.
+  if (s.completed === lastPaintedCompleted && !(s.finished || s.cancelled)) {
+    return;
+  }
+  lastPaintedCompleted = s.completed;
+
+  $("runIdLabel").textContent = `· ${s.run_id} · ${s.target_url}`;
+  $("statCompleted").textContent = `${s.completed} / ${s.total_requests}`;
+  $("statSucceeded").textContent = fmtNum(s.succeeded);
+  $("statFailed").textContent = fmtNum(s.failed);
+  $("statThroughput").textContent = `${s.throughput_rps ?? 0} req/s`;
+  $("statP50").textContent = s.p50_sec !== null ? `${s.p50_sec}s` : "—";
+  $("statP95").textContent = s.p95_sec !== null ? `${s.p95_sec}s` : "—";
+  $("statP99").textContent = s.p99_sec !== null ? `${s.p99_sec}s` : "—";
+
+  const pct = s.total_requests ? (s.completed / s.total_requests) * 100 : 0;
+  $("progressBar").style.width = pct + "%";
+
+  renderKV($("workerCounts"), s.worker_counts);
+  const combined = { ...s.master_counts };
+  for (const [code, cnt] of Object.entries(s.status_counts || {})) {
+    combined[`status_${code}`] = cnt;
+  }
+  renderKV($("masterCounts"), combined);
+
+  if (!showAllLogs) {
+    renderLogRows(s.recent || []);
+  }
+}
+
+function tickElapsed() {
+  if (runFrozenElapsedSec !== null || runStartMs === null) return;
+  const elapsed = (Date.now() - runStartMs) / 1000;
+  $("statElapsed").textContent = `${elapsed.toFixed(1)}s`;
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function renderLogRows(rows) {
+  const body = $("recentBody");
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="6" class="empty">no requests yet</td></tr>';
+    return;
+  }
+  body.innerHTML = rows
+    .slice()
+    .reverse()
+    .map((r) => {
+      const okClass = r.status_code === 200 ? "status-200" : "status-bad";
+      // Show response on success, error on failure. One column, two purposes.
+      const text = r.status_code === 200 ? (r.response || "") : (r.error || "");
+      const truncated = escapeHtml(text.replace(/\s+/g, " ")).slice(0, 90);
+      const more = text.length > 90 ? "…" : "";
+      const fullEscaped = escapeHtml(text);
+      return `<tr class="log-row" data-full="${fullEscaped}">
+        <td>${r.index}</td>
+        <td class="${okClass}">${r.status_code ?? "ERR"}</td>
+        <td>${r.latency_sec}</td>
+        <td>${r.worker_id ?? "—"}</td>
+        <td>${r.master_id ?? "—"}</td>
+        <td class="log-cell">${truncated}${more}</td>
+      </tr>`;
+    })
+    .join("");
+}
+
+async function refreshFullLogs() {
+  if (!currentRunId) return;
+  try {
+    const { results } = await api(`/api/run/${currentRunId}/results`);
+    renderLogRows(results);
+  } catch (e) {
+    toast(`fetch results failed: ${e.message}`, true);
+  }
+}
+
+async function pollRun() {
+  if (!currentRunId) return;
+  try {
+    const s = await api(`/api/run/${currentRunId}`);
+    renderSnapshot(s);
+    if (showAllLogs) {
+      // Refresh the full log too while in "all" mode. Throttle to every other
+      // tick (~1s) since this can be heavy at 1000+ rows.
+      if (!pollRun._tick) pollRun._tick = 0;
+      pollRun._tick++;
+      if (pollRun._tick % 2 === 0) await refreshFullLogs();
+    }
+    if (s.finished || s.cancelled) {
+      stopPolling();
+      $("runBtn").disabled = false;
+      $("cancelBtn").disabled = true;
+      // Final repaint: if in "all" mode, ensure the table reflects every result.
+      if (showAllLogs) await refreshFullLogs();
+      if (s.error) toast(`run error: ${s.error}`, true);
+      else if (s.cancelled) toast("run cancelled");
+      else toast(`done: ${s.succeeded}/${s.total_requests} ok in ${s.elapsed_sec}s`);
+    }
+  } catch (e) {
+    toast(`poll failed: ${e.message}`, true);
+    stopPolling();
+  }
+}
+
+function startPolling() {
+  stopPolling();
+  // 1s poll instead of 500ms — at 1000+ requests the snapshot endpoint
+  // does an O(N) sort on every call. The local elapsed ticker handles the
+  // smooth-counter feel without hammering the server.
+  pollHandle = setInterval(pollRun, 1000);
+  if (elapsedTickHandle) clearInterval(elapsedTickHandle);
+  elapsedTickHandle = setInterval(tickElapsed, 200);
+}
+
+function stopPolling() {
+  if (pollHandle) clearInterval(pollHandle);
+  pollHandle = null;
+  if (elapsedTickHandle) clearInterval(elapsedTickHandle);
+  elapsedTickHandle = null;
+}
+
+// --- RAG toggle wiring ---
+// Show/hide the RAG-only controls based on the checkbox state, and poll
+// the RAG service's health so the user knows whether enabling RAG will
+// actually work. The server takes care of the URL rewrite (/generate →
+// /rag/generate) so the Target URL field stays the same regardless.
+function syncRagVisibility() {
+  $("ragControls").style.display = $("useRag").checked ? "block" : "none";
+}
+$("useRag").addEventListener("change", syncRagVisibility);
+syncRagVisibility();
+
+async function loadRagHealth() {
+  const elem = $("ragHealth");
+  try {
+    const data = await api("/api/rag/health");
+    if (data.available) {
+      elem.textContent = "● up";
+      elem.style.color = "var(--ok)";
+    } else {
+      elem.textContent = "● down";
+      elem.style.color = "var(--err)";
+    }
+  } catch (e) {
+    elem.textContent = "● unknown";
+    elem.style.color = "var(--muted)";
+  }
+}
+loadRagHealth();
+setInterval(loadRagHealth, 10000);
+
+$("runBtn").addEventListener("click", async () => {
+  const useRag = $("useRag").checked;
+  const body = {
+    target_url: $("targetUrl").value.trim(),
+    total_requests: parseInt($("totalRequests").value, 10),
+    concurrency: parseInt($("concurrency").value, 10),
+    prompt: $("prompt").value,
+    max_new_tokens: parseInt($("maxNewTokens").value, 10),
+    request_timeout_sec: parseFloat($("timeoutSec").value),
+    use_rag: useRag,
+  };
+  if (useRag) {
+    body.top_k = parseInt($("ragTopK").value, 10);
+    const bookIdRaw = $("ragBookId").value.trim();
+    if (bookIdRaw !== "") {
+      body.book_id = parseInt(bookIdRaw, 10);
+    }
+  }
+  try {
+    $("runBtn").disabled = true;
+    const { run_id } = await api("/api/run", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    currentRunId = run_id;
+    $("cancelBtn").disabled = false;
+    $("toggleLogsBtn").disabled = false;
+    $("exportCsvBtn").disabled = false;
+    showAllLogs = false;
+    $("toggleLogsBtn").textContent = "Show all";
+    $("logsMode").textContent = "live tail (last 50)";
+    runStartMs = Date.now();
+    runFrozenElapsedSec = null;
+    lastPaintedCompleted = -1;
+    $("statElapsed").textContent = "0.0s";
+    toast(`started run ${run_id}`);
+    startPolling();
+    pollRun();
+  } catch (e) {
+    $("runBtn").disabled = false;
+    toast(`failed to start: ${e.message}`, true);
+  }
+});
+
+$("toggleLogsBtn").addEventListener("click", async () => {
+  if (!currentRunId) return;
+  showAllLogs = !showAllLogs;
+  if (showAllLogs) {
+    $("toggleLogsBtn").textContent = "Show tail";
+    $("logsMode").textContent = "all results";
+    await refreshFullLogs();
+  } else {
+    $("toggleLogsBtn").textContent = "Show all";
+    $("logsMode").textContent = "live tail (last 50)";
+    // The next poll tick will repaint the tail; trigger one immediately.
+    pollRun();
+  }
+});
+
+$("exportCsvBtn").addEventListener("click", () => {
+  if (!currentRunId) return;
+  // Trigger a download by navigating to the CSV endpoint. Content-Disposition
+  // attachment header makes the browser save instead of render.
+  window.location.href = `/api/run/${currentRunId}/csv`;
+});
+
+$("cancelBtn").addEventListener("click", async () => {
+  if (!currentRunId) return;
+  try {
+    await api(`/api/run/${currentRunId}/cancel`, { method: "POST" });
+    toast("cancel requested");
+  } catch (e) {
+    toast(`cancel failed: ${e.message}`, true);
+  }
+});
+
+loadServices();
+</script>
+</body>
+</html>

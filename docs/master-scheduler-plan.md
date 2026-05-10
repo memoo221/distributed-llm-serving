@@ -27,13 +27,13 @@ NGINX (with `least_conn`) already balances client requests across **2 master rep
 ```
 
 - **Pools are disjoint.** Each master owns exactly **1 GPU + 4 CPU workers**. m1 has no knowledge of m2's workers and vice versa. There is no cross-master routing.
-- Workers heartbeat directly to their owning master (set `MASTER_URL=http://master1:7000` on m1's workers, `http://master2:7000` on m2's). **No worker code change** — `MASTER_URL` is already an env var ([workers/kaggle_worker.py:23](../workers/kaggle_worker.py#L23)).
+- Workers heartbeat directly to their owning master (set `MASTER_URL=http://master1:7000` on m1's workers, `http://master2:7000` on m2's). **No worker code change** — `MASTER_URL` is already an env var ([workers/kaggle/kaggle_worker.py:23](../workers/kaggle/kaggle_worker.py#L23)).
 
 ### Worker characteristics
 
 - **GPU workers** (Kaggle Tesla T4, Qwen 2.5 0.5B): ~3.5 req/s sustained, sweet spot **16 concurrent**. 1 per master.
 - **CPU workers** (TinyLlama or Qwen): 30–120 s per single request — **30–60× slower** than GPU. 4 per master.
-- All workers expose the same contract: `POST /generate` (auth: `X-API-Key`), `GET /health` (no auth), and POST heartbeats every 5 s to `{MASTER_URL}/heartbeat` ([workers/kaggle_worker.py:87-97](../workers/kaggle_worker.py#L87-L97)).
+- All workers expose the same contract: `POST /generate` (auth: `X-API-Key`), `GET /health` (no auth), and POST heartbeats every 5 s to `{MASTER_URL}/heartbeat` ([workers/kaggle/kaggle_worker.py:87-97](../workers/kaggle/kaggle_worker.py#L87-L97)).
 - Heartbeat payload already carries everything needed: `worker_id`, `url` (worker self-URL), `active_requests`, `queue_depth`, `total_requests`, `total_errors`, `gpu_util_pct`, `vram_used_mb`, `timestamp`.
 - Workers do **internal dynamic batching** (50 ms window, batch size 8). Raw `active_requests` underestimates true latency impact; the scheduler must look at queue depth too.
 
