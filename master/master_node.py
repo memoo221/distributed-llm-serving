@@ -27,22 +27,27 @@ class MasterRequestTimeout(Exception):
 
 
 def _is_retryable_status(status: int | None) -> bool:
-    """Treat anything 5xx + 408/425/429 as transient.
+    """Treat anything 5xx + 404/408/425/429 as transient.
 
-    Includes Cloudflare's 52x family (520/521/522/524 — "edge can't reach
-    origin"), which routinely shows up when cloudflared or tnr is mid-hiccup.
-    A worker that genuinely doesn't want this request would return 4xx, which
-    we surface to the client unchanged via AllRetriesFailed.
+    Why 404 is in here: in our topology the master reaches Thunder workers
+    through the `tnr ports forward` edge proxy. When the backend worker is
+    briefly unreachable (process restart, tmux flap, port re-bind), tnr's
+    edge returns 404 instead of the more conventional 502/521. From the
+    master's perspective that's "try another worker", not "the request is
+    malformed". Also covers Cloudflare's 52x family on the cloudflared side.
+
+    Genuinely client-facing 4xx (400/401/403/422/etc) still surface as
+    AllRetriesFailed so they're not silently retried into oblivion.
     """
     if status is None:
         return False
-    if status in (408, 425, 429):
+    if status in (404, 408, 425, 429):
         return True
     return 500 <= status < 600
 
 
 # Kept for backwards-compat with anything reading the constant.
-_RETRY_STATUSES = {408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 524}
+_RETRY_STATUSES = {404, 408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 524}
 
 
 @dataclass
