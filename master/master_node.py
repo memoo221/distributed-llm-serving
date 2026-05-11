@@ -189,8 +189,20 @@ class MasterNode:
                 asyncio.create_task(self._dispatch(item, worker))
 
     def _effective_load_with_local(self, w: WorkerState) -> float:
+        # local_inflight is the authoritative real-time count of requests this
+        # master has dispatched-but-not-completed for this worker. The worker's
+        # heartbeat active_requests is the SAME quantity from the worker side,
+        # just delayed by up to HEARTBEAT_INTERVAL (5s). Adding both
+        # double-counts every in-flight request, which caps effective slots
+        # at slots/2 — the symptom is GPUs sitting at ~50% util under heavy
+        # concurrent load even when the master queue is full.
+        #
+        # Use max() to be defensive against the case where a heartbeat arrives
+        # showing more than we tracked locally (e.g. master process restarted
+        # mid-flight) — we don't want to over-dispatch in that scenario.
         local = self._local_inflight.get(w.worker_id, 0)
-        return (w.active_requests + w.queue_depth + local) / max(1, w.slots)
+        in_flight = max(local, w.active_requests + w.queue_depth)
+        return in_flight / max(1, w.slots)
 
     def _pick_worker_for(self, item: QueuedRequest) -> WorkerState | None:
         workers = self._registry.snapshot()
