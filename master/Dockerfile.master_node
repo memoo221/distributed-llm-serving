@@ -12,4 +12,18 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 
 COPY master ./master
 
-CMD ["uvicorn", "master.master_app:app", "--host", "0.0.0.0", "--port", "7000"]
+# --timeout-keep-alive 75: uvicorn's default is 5s, which is shorter than
+# nginx's connection reuse window. The race: nginx grabs an idle keepalive
+# connection from its upstream pool, but uvicorn already closed it after 5s
+# of idle, so nginx gets EOF before the response headers ("upstream
+# prematurely closed connection while reading response header"). Setting
+# this longer than nginx ever holds an idle connection eliminates the race.
+#
+# --backlog 4096: increases uvicorn's TCP accept queue from the default 2048.
+# Note: capped by the kernel's net.core.somaxconn (set in docker-compose.yml
+# via sysctls) — without that, this is silently truncated to 128.
+CMD ["uvicorn", "master.master_app:app", \
+     "--host", "0.0.0.0", \
+     "--port", "7000", \
+     "--timeout-keep-alive", "75", \
+     "--backlog", "4096"]

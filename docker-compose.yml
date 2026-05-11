@@ -46,6 +46,12 @@ services:
     environment:
       MASTER_ID: master1
       WORKERS_BOOTSTRAP: '[{"worker_id":"worker_1_1","url":"http://cpu_worker_1_1:9001","device_type":"cpu"}]'
+    # Lift the kernel TCP accept-queue cap from the default 128 so uvicorn's
+    # --backlog 4096 actually takes effect. Without this, a sudden burst of
+    # concurrent connections overflows the queue and surfaces as ECONNREFUSED
+    # at the client (NGINX), which then marks the master down.
+    sysctls:
+      - net.core.somaxconn=4096
 
   master2:
     build:
@@ -57,6 +63,8 @@ services:
     environment:
       MASTER_ID: master2
       WORKERS_BOOTSTRAP: '[{"worker_id":"worker_2_1","url":"http://cpu_worker_2_1:9001","device_type":"cpu"}]'
+    sysctls:
+      - net.core.somaxconn=4096
 
   cpu_worker_1_1:
     build:
