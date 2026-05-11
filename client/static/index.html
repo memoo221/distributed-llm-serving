@@ -174,6 +174,17 @@
   td.status-200 { color: var(--ok); }
   td.status-bad { color: var(--err); }
 
+  details.resp summary {
+    cursor: pointer;
+    color: var(--text);
+  }
+  details.resp pre {
+    margin: 6px 0 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text);
+  }
+
   .breakdown {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -232,6 +243,24 @@
       <h2>Run Load Test</h2>
       <label for="targetUrl">Target URL</label>
       <input type="text" id="targetUrl" value="http://localhost:8008/generate" />
+
+      <label style="display:flex; align-items:center; gap:8px; margin-top:10px;">
+        <input type="checkbox" id="useRag" />
+        <span style="color: var(--muted); font-size: 12px;">Use RAG (sends requests to <span style="font-family: ui-monospace, monospace;">/rag/generate</span>)</span>
+      </label>
+
+      <div id="ragOptions" style="display:none;">
+        <div class="row">
+          <div>
+            <label for="ragTopK">top_k</label>
+            <input type="number" id="ragTopK" value="3" min="0" max="20" />
+          </div>
+          <div>
+            <label for="ragBookId">book_id</label>
+            <input type="number" id="ragBookId" placeholder="(optional)" />
+          </div>
+        </div>
+      </div>
 
       <div class="row">
         <div>
@@ -336,11 +365,12 @@
               <th>Latency (s)</th>
               <th>Worker</th>
               <th>Master</th>
+              <th>Response</th>
               <th>Error</th>
             </tr>
           </thead>
           <tbody id="recentBody">
-            <tr><td colspan="6" class="empty">no requests yet</td></tr>
+            <tr><td colspan="7" class="empty">no requests yet</td></tr>
           </tbody>
         </table>
       </div>
@@ -454,6 +484,26 @@ function fmtNum(n) {
   return n.toString();
 }
 
+function escapeHtml(s) {
+  return (s ?? "")
+    .toString()
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function switchRagUrl(url, enable) {
+  const u = (url || "").trim();
+  if (!u) return u;
+  if (enable) {
+    if (u.includes("/rag/")) return u;
+    return u.replace(/\/generate\/?$/, "/rag/generate");
+  }
+  return u.replace(/\/rag\/generate\/?$/, "/generate");
+}
+
 function renderKV(elem, obj) {
   const entries = Object.entries(obj || {});
   if (!entries.length) {
@@ -497,7 +547,7 @@ function renderSnapshot(s) {
 function renderLogRows(rows) {
   const body = $("recentBody");
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="6" class="empty">no requests yet</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="empty">no requests yet</td></tr>';
     return;
   }
   body.innerHTML = rows
@@ -505,13 +555,21 @@ function renderLogRows(rows) {
     .reverse()
     .map((r) => {
       const okClass = r.status_code === 200 ? "status-200" : "status-bad";
-      const err = r.error ? r.error.replace(/</g, "&lt;").slice(0, 80) : "";
+      const err = r.error ? escapeHtml(r.error).slice(0, 120) : "";
+
+      const resp = r.response ? r.response.toString() : "";
+      const respPreview = escapeHtml(resp.replace(/\s+/g, " ").trim().slice(0, 120));
+      const respFull = escapeHtml(resp);
+      const respCell = resp
+        ? `<details class="resp"><summary>${respPreview || "(empty)"}</summary><pre>${respFull}</pre></details>`
+        : "";
       return `<tr>
         <td>${r.index}</td>
         <td class="${okClass}">${r.status_code ?? "ERR"}</td>
         <td>${r.latency_sec}</td>
         <td>${r.worker_id ?? "—"}</td>
         <td>${r.master_id ?? "—"}</td>
+        <td>${respCell}</td>
         <td>${err}</td>
       </tr>`;
     })
@@ -567,6 +625,8 @@ function stopPolling() {
 }
 
 $("runBtn").addEventListener("click", async () => {
+  const useRag = $("useRag").checked;
+  const bookRaw = $("ragBookId").value.trim();
   const body = {
     target_url: $("targetUrl").value.trim(),
     total_requests: parseInt($("totalRequests").value, 10),
@@ -574,6 +634,9 @@ $("runBtn").addEventListener("click", async () => {
     prompt: $("prompt").value,
     max_new_tokens: parseInt($("maxNewTokens").value, 10),
     request_timeout_sec: parseFloat($("timeoutSec").value),
+    use_rag: useRag,
+    rag_top_k: parseInt($("ragTopK").value, 10),
+    rag_book_id: bookRaw ? parseInt(bookRaw, 10) : null,
   };
   try {
     $("runBtn").disabled = true;
@@ -595,6 +658,13 @@ $("runBtn").addEventListener("click", async () => {
     $("runBtn").disabled = false;
     toast(`failed to start: ${e.message}`, true);
   }
+});
+
+$("useRag").addEventListener("change", () => {
+  const enabled = $("useRag").checked;
+  $("ragOptions").style.display = enabled ? "block" : "none";
+  const next = switchRagUrl($("targetUrl").value, enabled);
+  if (next) $("targetUrl").value = next;
 });
 
 $("toggleLogsBtn").addEventListener("click", async () => {

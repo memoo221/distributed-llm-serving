@@ -25,6 +25,7 @@ class RequestResult:
     latency_sec: float
     worker_id: str | None = None
     master_id: str | None = None
+    response: str | None = None
     error: str | None = None
 
 
@@ -36,6 +37,8 @@ class RunState:
     concurrency: int
     prompt: str
     max_new_tokens: int
+    rag_top_k: int | None = None
+    rag_book_id: int | None = None
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
     completed: int = 0
@@ -92,6 +95,9 @@ class RunState:
                     "latency_sec": round(r.latency_sec, 3),
                     "worker_id": r.worker_id,
                     "master_id": r.master_id,
+                    # Keep polling payload small; full response is available on
+                    # /run/{id}/results.
+                    "response": (r.response[:200] + "…") if (r.response and len(r.response) > 200) else r.response,
                     "error": r.error,
                 }
                 for r in self.results[-50:]
@@ -128,13 +134,21 @@ async def _fire_one(
     target_url: str,
     prompt: str,
     max_new_tokens: int,
+    rag_top_k: int | None,
+    rag_book_id: int | None,
     index: int,
 ) -> RequestResult:
     start = time.perf_counter()
     try:
+        payload: dict[str, Any] = {"prompt": prompt, "max_new_tokens": max_new_tokens}
+        if rag_top_k is not None:
+            payload["top_k"] = rag_top_k
+        if rag_book_id is not None:
+            payload["book_id"] = rag_book_id
+
         resp = await client.post(
             target_url,
-            json={"prompt": prompt, "max_new_tokens": max_new_tokens},
+            json=payload,
         )
         latency = time.perf_counter() - start
         if resp.status_code == 200:
@@ -145,6 +159,7 @@ async def _fire_one(
                 latency_sec=latency,
                 worker_id=data.get("worker_id"),
                 master_id=data.get("master_id"),
+                response=(data.get("response") or data.get("answer")),
             )
         body = resp.text[:200]
         return RequestResult(
@@ -175,7 +190,13 @@ async def _run_load_test(state: RunState, request_timeout: float) -> None:
                 if state.cancelled:
                     return
                 result = await _fire_one(
-                    client, state.target_url, state.prompt, state.max_new_tokens, i
+                    client,
+                    state.target_url,
+                    state.prompt,
+                    state.max_new_tokens,
+                    state.rag_top_k,
+                    state.rag_book_id,
+                    i,
                 )
                 state.results.append(result)
                 state.completed += 1
@@ -200,6 +221,8 @@ def start_run(
     prompt: str,
     max_new_tokens: int,
     request_timeout: float = 600.0,
+    rag_top_k: int | None = None,
+    rag_book_id: int | None = None,
 ) -> RunState:
     run_id = uuid.uuid4().hex[:12]
     state = RunState(
@@ -209,6 +232,8 @@ def start_run(
         concurrency=concurrency,
         prompt=prompt,
         max_new_tokens=max_new_tokens,
+        rag_top_k=rag_top_k,
+        rag_book_id=rag_book_id,
     )
     _runs[run_id] = state
 

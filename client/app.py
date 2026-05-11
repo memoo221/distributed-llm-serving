@@ -77,6 +77,11 @@ class RunRequest(BaseModel):
     max_new_tokens: int = Field(default=64, ge=1, le=512)
     request_timeout_sec: float = Field(default=600.0, ge=1.0, le=3600.0)
 
+    # RAG mode (targets /rag/generate) extra params
+    use_rag: bool = Field(default=False)
+    rag_top_k: int = Field(default=3, ge=0, le=20)
+    rag_book_id: int | None = Field(default=None)
+
 
 @app.post("/api/run")
 async def post_run(req: RunRequest) -> dict:
@@ -87,6 +92,8 @@ async def post_run(req: RunRequest) -> dict:
         prompt=req.prompt,
         max_new_tokens=req.max_new_tokens,
         request_timeout=req.request_timeout_sec,
+        rag_top_k=req.rag_top_k if req.use_rag else None,
+        rag_book_id=req.rag_book_id if req.use_rag else None,
     )
     return {"run_id": state.run_id}
 
@@ -113,6 +120,7 @@ async def get_run_results(run_id: str) -> dict:
                 "latency_sec": round(r.latency_sec, 3),
                 "worker_id": r.worker_id,
                 "master_id": r.master_id,
+                "response": r.response,
                 "error": r.error,
             }
             for r in state.results
@@ -127,7 +135,7 @@ async def get_run_csv(run_id: str) -> Response:
         raise HTTPException(404, "run not found")
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["index", "status_code", "latency_sec", "worker_id", "master_id", "error"])
+    writer.writerow(["index", "status_code", "latency_sec", "worker_id", "master_id", "response", "error"])
     for r in state.results:
         writer.writerow([
             r.index,
@@ -135,6 +143,7 @@ async def get_run_csv(run_id: str) -> Response:
             f"{r.latency_sec:.3f}",
             r.worker_id or "",
             r.master_id or "",
+            (r.response or "").replace("\n", " ").replace("\r", " "),
             (r.error or "").replace("\n", " ").replace("\r", " "),
         ])
     return Response(
