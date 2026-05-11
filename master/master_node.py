@@ -264,6 +264,11 @@ class MasterNode:
                 prompt=item.prompt,
                 max_new_tokens=item.max_new_tokens,
             )
+            # A successful /generate is itself proof the worker is alive —
+            # treat it as equivalent to a heartbeat. Keeps workers in the
+            # pool even if their cloudflared heartbeat path is temporarily
+            # broken (the tnr ports forward path we just used is unrelated).
+            self._registry.mark_seen(worker.worker_id)
             if not item.future.cancelled() and not item.future.done():
                 item.future.set_result(result)
 

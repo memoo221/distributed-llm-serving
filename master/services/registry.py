@@ -83,3 +83,17 @@ class WorkerRegistry:
         worker = self._workers.get(worker_id)
         if worker:
             worker.failure_cooldown_until = time.monotonic() + cooldown_sec
+
+    def mark_seen(self, worker_id: str) -> None:
+        """Refresh a worker's liveness from a successful interaction.
+
+        Called by the forwarder on every 200 response from /generate. Treats
+        a successful request as proof-of-life equivalent to a heartbeat, so
+        the worker stays in the pool even when its inbound heartbeat path
+        (cloudflared Quick Tunnel) is temporarily broken. Without this, a
+        cloudflared hiccup of >STALE_AFTER_SEC would empty the worker pool
+        despite the workers being fully reachable via tnr ports forward.
+        """
+        worker = self._workers.get(worker_id)
+        if worker:
+            worker.last_seen_monotonic = time.monotonic()

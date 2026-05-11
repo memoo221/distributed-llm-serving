@@ -2,8 +2,16 @@ import json
 import os
 
 
-# How long a worker can be silent before being considered stale (3 missed heartbeats)
-STALE_AFTER_SEC: float = float(os.getenv("WORKER_STALE_SEC", "15"))
+# How long a worker can be silent before being considered stale.
+# Bumped from 15s -> 60s. The heartbeat path is the laptop's cloudflared
+# Quick Tunnel, which can hiccup for 10-30s under load (free-tier rate
+# limits, occasional reconnects). Treating that brief blackout as "worker
+# dead" was making the master 504 tail requests even though the worker
+# was actually healthy and reachable via tnr ports forward the entire
+# time. Combined with mark_seen() being called on every successful
+# /generate response, this means workers stay in the pool as long as
+# they're serving traffic — cloudflared is now only needed at cold start.
+STALE_AFTER_SEC: float = float(os.getenv("WORKER_STALE_SEC", "60"))
 
 # Cooldown after a worker returns a transient error
 FAILURE_COOLDOWN_SEC: float = float(os.getenv("WORKER_FAILURE_COOLDOWN_SEC", "5"))
