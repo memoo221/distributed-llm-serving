@@ -24,9 +24,9 @@ WORKER_API_KEY: str = os.getenv("WORKER_API_KEY", "")
 
 # Forwarder timeouts (seconds)
 CONNECT_TIMEOUT: float = float(os.getenv("WORKER_CONNECT_TIMEOUT", "10.0"))
-# 120s is enough for batched generate (~5s per batch of 16 prompts × 64 tokens
-# on A100). Anything longer means the worker is hung — fail fast and retry
-# on a healthy peer rather than waiting on a stuck CUDA context.
+# Per-attempt read timeout. Long enough for a batched generate of large
+# prompts on A100 (~30s p50 at BATCH_SIZE=64, fp16 Llama 3.1 8B), short
+# enough that a stuck worker fails fast so we can retry on a healthy peer.
 READ_TIMEOUT: float = float(os.getenv("WORKER_READ_TIMEOUT", "120.0"))
 WRITE_TIMEOUT: float = float(os.getenv("WORKER_WRITE_TIMEOUT", "5.0"))
 POOL_TIMEOUT: float = float(os.getenv("WORKER_POOL_TIMEOUT", "2.0"))

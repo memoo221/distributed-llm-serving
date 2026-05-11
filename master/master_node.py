@@ -26,7 +26,23 @@ class MasterRequestTimeout(Exception):
     pass
 
 
-_RETRY_STATUSES = {429, 500, 502, 503, 504}
+def _is_retryable_status(status: int | None) -> bool:
+    """Treat anything 5xx + 408/425/429 as transient.
+
+    Includes Cloudflare's 52x family (520/521/522/524 — "edge can't reach
+    origin"), which routinely shows up when cloudflared or tnr is mid-hiccup.
+    A worker that genuinely doesn't want this request would return 4xx, which
+    we surface to the client unchanged via AllRetriesFailed.
+    """
+    if status is None:
+        return False
+    if status in (408, 425, 429):
+        return True
+    return 500 <= status < 600
+
+
+# Kept for backwards-compat with anything reading the constant.
+_RETRY_STATUSES = {408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 524}
 
 
 @dataclass
@@ -231,13 +247,21 @@ class MasterNode:
 
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code if exc.response is not None else None
-            if status in _RETRY_STATUSES:
+            if _is_retryable_status(status):
+                # Transient upstream — same worker can recover after cooldown,
+                # so don't permanently blacklist it for this request.
                 self._registry.mark_failed(worker.worker_id)
-                item.tried_workers.add(worker.worker_id)
                 await self._retry_or_fail(item)
             else:
+                # Hard non-retryable status from the worker (e.g. genuine 4xx).
+                # Surface as AllRetriesFailed so the client sees a clean 502
+                # with the worker that errored, not a raw HTTPStatusError.
+                from master.services.forwarder import AllRetriesFailed
+                item.tried_workers.add(worker.worker_id)
                 if not item.future.cancelled() and not item.future.done():
-                    item.future.set_exception(exc)
+                    item.future.set_exception(
+                        AllRetriesFailed(list(item.tried_workers))
+                    )
 
         except (
             # Anything transport-level is transient by assumption — retry.
@@ -253,7 +277,11 @@ class MasterNode:
             # queue wait that ends in MasterRequestTimeout.
             httpx.TransportError,
         ) as exc:
-            self._registry.mark_failed(worker.worker_id)
+            # Short cooldown (1s) — tunnel hiccup, not worker death.
+            # Default 5s cooldown was making one worker absorb all traffic
+            # any time the other had a brief network blip, causing the
+            # remaining worker's queue to spike and drive 504s on the tail.
+            self._registry.mark_failed(worker.worker_id, cooldown_sec=1.0)
             await self._retry_or_fail(item)
 
         except Exception as exc:
