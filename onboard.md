@@ -250,7 +250,7 @@ The default cluster shape: 2 Thunder instances, one worker each on
 `cuda:0`, each registered to a different master:
 
 ```
-Your laptop (NAT'd)                                  Thunder instance A (id 0, uuid gaxwh8fq)
+Your laptop (NAT'd)                                  Thunder instance A (id 0, uuid nekld4ou)
 ┌──────────────────────────────────────────┐        ┌─────────────────────────────────────────┐
 │ docker: nginx, master1, master2, CPUs    │        │ uvicorn :8000  thunder_a_gpu0 → cuda:0  │
 │ cloudflared :7001 → MASTER1_URL          │ ◄──────┤   heartbeats to MASTER1_URL             │
@@ -258,7 +258,7 @@ Your laptop (NAT'd)                                  Thunder instance A (id 0, u
 │                                          │        │    worker per instance" below)          │
 │ master /generate → https://<uuid>-8000.. │ ──────►│   exposed via `tnr ports forward`       │
 └──────────────────────────────────────────┘        └─────────────────────────────────────────┘
-                                                     Thunder instance B (id 1, uuid xcidc8hb)
+                                                     Thunder instance B (id 1, uuid sr46tweb)
                                                      ┌─────────────────────────────────────────┐
                                                      │ uvicorn :8000  thunder_b_gpu0 → cuda:0  │
                                                      │   heartbeats to MASTER2_URL             │
@@ -297,8 +297,8 @@ Why this shape:
 
 | Worker ID | Instance | GPU | Port | SELF_URL | Heartbeats to |
 |---|---|---|---|---|---|
-| `thunder_a_gpu0` | 0 (`gaxwh8fq`) | 0 | 8000 | `https://gaxwh8fq-8000.thundercompute.net` | master1 |
-| `thunder_b_gpu0` | 1 (`xcidc8hb`) | 0 | 8000 | `https://xcidc8hb-8000.thundercompute.net` | master2 |
+| `thunder_a_gpu0` | 0 (`nekld4ou`) | 0 | 8000 | `https://nekld4ou-8000.thundercompute.net` | master1 |
+| `thunder_b_gpu0` | 1 (`sr46tweb`) | 0 | 8000 | `https://sr46tweb-8000.thundercompute.net` | master2 |
 
 Each master ends up with 1 CPU + 1 GPU worker. NGINX least-conn distributes
 requests roughly 50/50 across masters.
@@ -398,7 +398,7 @@ Posted to `MASTER_URL/heartbeat` every 5 seconds:
 ```json
 {
   "worker_id": "thunder_a_gpu0",
-  "url": "https://gaxwh8fq-8000.thundercompute.net",
+  "url": "https://nekld4ou-8000.thundercompute.net",
   "device_type": "gpu",
   "active_requests": 0,
   "queue_depth": 0,
