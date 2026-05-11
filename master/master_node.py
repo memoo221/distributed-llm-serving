@@ -60,6 +60,11 @@ class QueuedRequest:
     # Total dispatch attempts for this request. Bounded to prevent a queue
     # of always-failing requests from looping forever inside the deadline.
     attempts: int = 0
+    # Diagnostic: every dispatch attempt with its outcome. Used in the error
+    # detail when AllRetriesFailed fires so the user can see the actual chain
+    # of failures rather than just the (often-empty) tried_workers set.
+    # Format: list of "worker_id:outcome" e.g. "thunder_a_gpu0:http_503".
+    dispatch_log: list[str] = field(default_factory=list)
 
 
 # Hard cap on per-request dispatches. With 4 workers (2 CPU + 2 GPU) and
@@ -259,6 +264,7 @@ class MasterNode:
 
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code if exc.response is not None else None
+            item.dispatch_log.append(f"{worker.worker_id}:http_{status}")
             if _is_retryable_status(status):
                 # Transient upstream — same worker can recover after cooldown,
                 # so don't permanently blacklist it for this request.
@@ -272,7 +278,7 @@ class MasterNode:
                 item.tried_workers.add(worker.worker_id)
                 if not item.future.cancelled() and not item.future.done():
                     item.future.set_exception(
-                        AllRetriesFailed(list(item.tried_workers))
+                        AllRetriesFailed(item.dispatch_log)
                     )
 
         except (
@@ -289,6 +295,7 @@ class MasterNode:
             # queue wait that ends in MasterRequestTimeout.
             httpx.TransportError,
         ) as exc:
+            item.dispatch_log.append(f"{worker.worker_id}:transport_{type(exc).__name__}")
             # Short cooldown (1s) — tunnel hiccup, not worker death.
             # Default 5s cooldown was making one worker absorb all traffic
             # any time the other had a brief network blip, causing the
@@ -297,13 +304,13 @@ class MasterNode:
             await self._retry_or_fail(item)
 
         except Exception as exc:
+            item.dispatch_log.append(f"{worker.worker_id}:exc_{type(exc).__name__}")
             # Last-resort: don't surface a raw httpx/json exception to the
             # client (FastAPI would render it as 500). Convert to AllRetriesFailed
             # so master_router maps it to a clean 502 with the worker list.
             from master.services.forwarder import AllRetriesFailed
             if not item.future.cancelled() and not item.future.done():
-                tried = list(item.tried_workers) + [worker.worker_id]
-                item.future.set_exception(AllRetriesFailed(tried))
+                item.future.set_exception(AllRetriesFailed(item.dispatch_log))
 
         finally:
             self._local_inflight[worker.worker_id] = max(
@@ -319,7 +326,7 @@ class MasterNode:
             return
         if item.attempts >= _MAX_ATTEMPTS_PER_REQUEST:
             from master.services.forwarder import AllRetriesFailed
-            item.future.set_exception(AllRetriesFailed(list(item.tried_workers)))
+            item.future.set_exception(AllRetriesFailed(item.dispatch_log))
             return
 
         # Re-enqueue; next tick will pick a different worker (or the same one

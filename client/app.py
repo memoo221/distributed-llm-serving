@@ -140,7 +140,7 @@ class RunRequest(BaseModel):
     target_url: str = Field(default="http://localhost:8008/generate")
     total_requests: int = Field(default=100, ge=1, le=100_000)
     concurrency: int = Field(default=20, ge=1, le=2000)
-    prompt: str = Field(default="Write a short haiku about distributed systems.")
+    prompt: str = Field(default="What does a node represent in a distributed system?")
     max_new_tokens: int = Field(default=64, ge=1, le=512)
     request_timeout_sec: float = Field(default=600.0, ge=1.0, le=3600.0)
     # RAG controls. When use_rag=true the runner POSTs to /rag/generate
