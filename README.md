@@ -2,162 +2,312 @@
 
 **Ain Shams University | Faculty of Engineering | 2nd Semester 2025/2026**
 
-A distributed system for serving 1000+ concurrent LLM inference requests across heterogeneous worker nodes (CPU + remote GPU), with load balancing, threshold-based scheduling, heartbeat liveness, fault tolerance, and a built-in test harness.
+A distributed system for serving 1000+ concurrent LLM inference requests across heterogeneous worker nodes (CPU + remote GPU), with NGINX load balancing, threshold-based scheduling, heartbeat liveness tracking, fault tolerance with automatic retries, RAG support, and a built-in test UI.
+
+---
 
 ## Architecture
 
 ```
 Client (test UI or load script)
         ↓
-NGINX (port 8008, least-conn)
+NGINX :8008  (least-conn LB + proxy_next_upstream failover)
         ↓
 Master Nodes (master1 :7001, master2 :7002)
         ↓
   ┌─────────────────────┬─────────────────────────────────────┐
-  │                     │                                     │
 CPU workers       Thunder GPU workers
-(local docker,    (2 workers across 2 rented instances,
- 1 per master,    2× A100 80GB each, Llama 3.1 8B,
- Qwen 2.5 0.5B)   1 worker per master — symmetric.
-                   Continuous batching, BATCH_SIZE=64.)
+(local docker,    (2 rented A100 80GB instances, Llama 3.1 8B,
+ 1 per master,     1 worker per master — symmetric.
+ Qwen 2.5 0.5B)    Continuous batching, BATCH_SIZE=64)
 ```
 
-Two master nodes load-balanced by nginx. Each master runs a scheduler that picks workers based on request size (large requests → GPU only; small requests → GPU first with overflow to CPU). Workers heartbeat every 5s; failed workers go into exponential cooldown. Thunder GPU workers reach the masters via `cloudflared` Quick Tunnels (heartbeats) and are reachable from masters via `tnr ports forward` HTTPS URLs (`/generate` callbacks). Each Thunder worker batches up to 64 concurrent requests into a single forward pass; the worker advertises this as its `slots` value in the heartbeat and the master honors it for scheduling.
+Two master nodes load-balanced by NGINX. Each master runs a scheduler that picks workers based on request size and live load (large requests → GPU only; small requests → GPU first with overflow to CPU). Workers heartbeat every 5 s; failed workers enter exponential cooldown. Thunder GPU workers reach the masters via `cloudflared` Quick Tunnels (heartbeats) and are reachable from masters via `tnr ports forward` HTTPS URLs (`/generate` callbacks).
 
-## Project Structure
-
-```
-distributed-llm-serving/
-├── master/         # Master scheduler, worker registry, request forwarder (port 7000)
-│   ├── master_app.py
-│   ├── routers/master_router.py
-│   └── services/   # config, registry, scheduler, forwarder, models
-├── workers/        # Worker implementations
-│   ├── worker_router.py / worker_service.py    # Local CPU (Qwen 2.5 0.5B)
-│   ├── launch_workers.sh                       # Thunder-side bash launcher (kill old + spawn tmux)
-│   ├── thunder/                                # Remote GPU on Thunder Compute
-│   │   ├── thunder_worker.py                   #   continuous batching, BATCH_SIZE=64
-│   │   ├── thunder_requirements.txt
-│   │   └── THUNDER_SETUP.md                    #   comprehensive walkthrough
-│   ├── groq/                                   # Dormant — replaced by Thunder
-│   │   ├── groq_worker.py / Dockerfile.groq
-│   │   └── requirements-groq.txt
-│   └── kaggle/                                 # Retired — old Kaggle GPU path
-│       ├── kaggle_worker.py / inference.py
-│       └── KAGGLE_SETUP.md
-├── nginx/nginx.conf                            # Layer-7 load balancer config
-├── client/         # Test UI (FastAPI + HTML)
-│   ├── app.py
-│   ├── runner.py
-│   ├── docker_control.py
-│   └── static/index.html
-├── scripts/
-│   └── redeploy.ps1                            # Laptop-side Thunder redeploy driver
-├── models/         # Local model files + download script
-├── llm/, rag/, monitoring/, common/, lb/       # Subsystems
-├── tests/          # Load + scheduler + smoke tests
-├── docker-compose.yml
-├── onboard.md      # ← Full setup walkthrough, including Thunder Compute
-└── README.md
-```
+For details on the request flow, scheduling algorithm, and fault-tolerance layers, see [`onboard.md`](onboard.md).
 
 ---
 
 ## Setup
 
-### 1. Repo + Python env
-
-```bash
-git clone https://github.com/<your-fork>/distributed-llm-serving.git
-cd distributed-llm-serving
-
-python3 -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-### 2. Local stack (CPU workers + masters + nginx)
+### Prerequisites (one-time, on your laptop)
 
 ```powershell
-# Download the local CPU model once
-python models/download_qwen.py
+# Python 3.10+
+python --version
 
-# Bring up the local stack
-docker compose up -d --build nginx master1 master2 cpu_worker_1_1 cpu_worker_2_1
-```
+# Docker Desktop (for the local stack)
+docker --version
+docker compose version
 
-### 3. Test UI on the host
+# Thunder CLI (for the GPU workers)
+pip install tnr
+tnr --version
 
-```powershell
+# Cloudflare tunnel (for heartbeats from Thunder workers to your laptop's masters)
+winget install --id Cloudflare.cloudflared
+cloudflared --version
+
+# Python deps for the test UI
 pip install fastapi uvicorn httpx pydantic
-python -m client.app
 ```
 
-Open `http://localhost:8050`. The UI shows docker services, live worker registry across masters, and a load-test runner with CSV export.
+You'll also need a **HuggingFace token** with access to `meta-llama/Llama-3.1-8B-Instruct` (or swap to an open model like `Qwen/Qwen2.5-7B-Instruct`).
 
-### 4. Thunder GPU workers (optional, for the GPU layer)
-
-The full Thunder Compute walkthrough — provisioning instances, fixing
-Windows SSH key permissions, `tnr scp` of the worker code, `tnr ports
-forward` for public HTTPS endpoints, two `cloudflared` Quick Tunnels for
-master heartbeats, the `WORKER_DEVICE` patch for GPU pinning, continuous
-batching, and the launch flow — lives in [`workers/thunder/THUNDER_SETUP.md`](workers/thunder/THUNDER_SETUP.md). [`onboard.md`](onboard.md#thunder-compute-gpu-workers) has a condensed reference with the runtime architecture diagram.
-
-Day-to-day Thunder redeploys are one command:
+### One-time: download the local CPU model
 
 ```powershell
-.\scripts\redeploy.ps1            # idempotent — skips if workers already healthy
-.\scripts\redeploy.ps1 -Force     # force redeploy (e.g. after editing thunder_worker.py)
+python models/download_qwen.py
 ```
 
-The script pushes [`thunder_worker.py`](workers/thunder/thunder_worker.py) and [`launch_workers.sh`](workers/launch_workers.sh) to both instances in parallel, kicks off `bash launch_workers.sh` over `tnr connect`, then polls master registries until both workers heartbeat. Edit the `$Config` block at the top to change `BATCH_SIZE`, cloudflared URLs, or the HF token.
-
-In short: each Thunder instance runs ONE FastAPI worker process (on
-`cuda:0`), exposed via `tnr ports forward` HTTPS URLs. `cloudflared` exposes
-each master at a public URL so workers can POST heartbeats. No extra
-container is built locally — Thunder workers are plain Python processes
-on the rented boxes.
+This pulls Qwen 2.5 0.5B once and caches it under `./models/`, mounted read-only into the CPU worker containers.
 
 ---
 
-## Running
+## Running — Full Step-by-Step
+
+These steps must be done in order. Each opens a window that **stays open** for the duration of your session.
+
+### Step 1 — Bring up the local Docker stack
 
 ```powershell
-# Start the local stack
-docker compose up -d nginx master1 master2 cpu_worker_1_1 cpu_worker_2_1
-
-# Verify
-curl http://localhost:8008/nginx/health
-curl.exe http://localhost:7001/scheduler/workers
-
-# End-to-end through nginx
-Invoke-RestMethod -Uri "http://localhost:8008/generate" -Method Post -ContentType "application/json" -Body '{"prompt":"hello","max_new_tokens":32}'
+docker compose up -d --build nginx master1 master2 cpu_worker_1_1 cpu_worker_2_1 rag qdrant
 ```
 
-For load testing with concurrency, latency percentiles, and per-request response inspection, use the test UI at `http://localhost:8050`.
+Verify everything is `Up`:
 
-See [`onboard.md`](onboard.md) for the full verification flow, the worker API contract, port reference, and Thunder operational notes.
+```powershell
+docker compose ps -a
+```
+
+You should see `distributed-nginx`, `master1`, `master2`, `cpu_worker_1_1`, `cpu_worker_2_1`, `rag`, `qdrant` all running.
+
+Quick sanity check:
+
+```powershell
+curl http://localhost:8008/nginx/health
+curl.exe http://localhost:7001/scheduler/workers
+curl.exe http://localhost:7002/scheduler/workers
+```
+
+Each master should show its CPU worker with `last_seen_sec_ago < 5`.
+
+### Step 2 — Launch the client / test UI
+
+In a **new terminal**, run the host-side test UI:
+
+```powershell
+python -m client.app
+```
+
+Open [http://localhost:8050](http://localhost:8050) in a browser. You should see the Nodes panel (auto-populated from docker-compose) and the Live Workers panel (showing the two CPU workers from each master). Keep this terminal open.
+
+> At this point you can already run /generate against the CPU tier through NGINX. If you only need the local CPU stack, skip to "Smoke test" below. The Thunder GPU steps (3–7) add the high-throughput tier.
+
+### Step 3 — Start two cloudflared Quick Tunnels (one per master)
+
+The Thunder GPU workers heartbeat *inbound* to your laptop, so each master needs a public URL. Open **two new terminals**, one for each tunnel, and leave both open for the entire session:
+
+**Terminal A:**
+```powershell
+cloudflared tunnel --url http://localhost:7001
+```
+
+After ~5 seconds it prints a line like:
+```
+Your quick Tunnel has been created! Visit it at:
+https://wherever-mixture-decimal-mart.trycloudflare.com
+```
+**Copy that URL — this is `MASTER1_URL`.** Do not close this terminal.
+
+**Terminal B:**
+```powershell
+cloudflared tunnel --url http://localhost:7002
+```
+**Copy that URL — this is `MASTER2_URL`.** Do not close this terminal.
+
+Quick verify:
+```powershell
+curl.exe https://<MASTER1_URL>/scheduler/workers
+curl.exe https://<MASTER2_URL>/scheduler/workers
+```
+Each should return the same JSON as `http://localhost:7001` / `:7002`.
+
+> The trycloudflare URLs are random and change every time you restart cloudflared. For a stable URL, set up a named tunnel with a free Cloudflare account.
+
+### Step 4 — Provision the Thunder Compute instances
+
+You need **two running Thunder instances** with 2× A100 80GB each. From the Thunder dashboard or CLI:
+
+```powershell
+tnr login            # opens browser, authenticate once
+tnr status           # list your instances
+```
+
+Note the `ID` and `UUID` for each running instance. Example output:
+```
+ID  UUID      STATUS    GPU
+0   gaxwh8fq  RUNNING   2× A100 80GB
+1   xcidc8hb  RUNNING   2× A100 80GB
+```
+
+On a fresh Windows install you may need to lock down the Thunder SSH keys once — see [`workers/thunder/THUNDER_SETUP.md`](workers/thunder/THUNDER_SETUP.md#step-1--fix-windows-ssh-key-permissions) for the `icacls` block.
+
+Open Thunder ports (one-time per instance, persistent across reboots):
+
+```powershell
+tnr ports forward 0 --add 8000
+tnr ports forward 1 --add 8000
+tnr ports list
+```
+
+Each instance now has a stable public URL: `https://<uuid>-8000.thundercompute.net`.
+
+### Step 5 — Wire URLs and UUIDs into `scripts/redeploy.ps1`
+
+Open [`scripts/redeploy.ps1`](scripts/redeploy.ps1) and update the `$Config` block at the top:
+
+```powershell
+$Config = @{
+    HfToken    = "hf_yourtoken_here"
+    Master1Url = "https://wherever-mixture-decimal-mart.trycloudflare.com"   # from Step 3 Terminal A
+    Master2Url = "https://alien-rarely-could-nova.trycloudflare.com"         # from Step 3 Terminal B
+    BatchSize  = 64
+    ModelName  = "meta-llama/Llama-3.1-8B-Instruct"
+    Instances = @(
+        @{ Id = 0; Uuid = "gaxwh8fq"; WorkerPrefix = "thunder_a"; MasterTarget = "master1" },  # UUIDs from Step 4
+        @{ Id = 1; Uuid = "xcidc8hb"; WorkerPrefix = "thunder_b"; MasterTarget = "master2" }
+    )
+}
+```
+
+You'll re-edit `Master1Url` / `Master2Url` every time you restart cloudflared (the trycloudflare URLs are random per session). UUIDs only change if you provision new instances.
+
+### Step 6 — Deploy the Thunder workers
+
+With the laptop stack (Step 1), test UI (Step 2), and both cloudflared tunnels (Step 3) all running:
+
+```powershell
+.\scripts\redeploy.ps1
+```
+
+The script:
+1. Pings both cloudflared URLs to verify the inbound path works.
+2. Pushes `thunder_worker.py` and `launch_workers.sh` to both instances in parallel via `tnr scp`.
+3. Pipes the bash launcher through `tnr connect <id>` on each instance — kills any old workers, writes a per-session env script, fires uvicorn under tmux (fire-and-forget).
+4. Polls `http://localhost:7001/scheduler/workers` and `:7002` every 5 s until both Thunder workers heartbeat with `slots=64`.
+
+A full cold start (model loaded from HF cache + first heartbeat) takes ~3 minutes. Subsequent redeploys are ~30 seconds.
+
+Add `-Force` to redeploy even when workers are already healthy (use after editing `thunder_worker.py`):
+
+```powershell
+.\scripts\redeploy.ps1 -Force
+```
+
+### Step 7 — Verify
+
+```powershell
+# Each master should show 1 CPU + 1 Thunder GPU worker, all fresh
+curl.exe http://localhost:7001/scheduler/workers
+curl.exe http://localhost:7002/scheduler/workers
+
+# End-to-end through NGINX
+Invoke-RestMethod -Uri "http://localhost:8008/generate" -Method Post `
+  -ContentType "application/json" `
+  -Body '{"prompt":"hello","max_new_tokens":32}'
+```
+
+In the test UI at [http://localhost:8050](http://localhost:8050), the **Live Workers** panel should now show all four workers:
+
+```
+master1  →  worker_1_1 (cpu)   ·  thunder_a_gpu0 (gpu, slots=64)
+master2  →  worker_2_1 (cpu)   ·  thunder_b_gpu0 (gpu, slots=64)
+```
+
+With `last_seen` < 5 s on all four, and `gpu / vram` columns showing live `nvidia-smi` numbers from the Thunder workers.
+
+---
+
+## Smoke test
+
+```powershell
+curl http://localhost:8008/nginx/health
+
+Invoke-RestMethod -Uri "http://localhost:8008/generate" -Method Post `
+  -ContentType "application/json" `
+  -Body '{"prompt":"Write a short poem about distributed systems.","max_new_tokens":128}'
+```
+
+For load testing with live throughput, p50/p95/p99 latency, per-worker breakdown, and CSV export, use the test UI at `http://localhost:8050` and click **Run Load Test**.
+
+---
+
+## Failover testing
+
+**Stop a master mid-test:**
+```powershell
+docker compose stop master1
+```
+NGINX detects master1 within ~1 failed request, marks it down, and routes 100% of traffic to master2. Capacity halves; the test continues. After:
+```powershell
+docker compose start master1
+```
+traffic rebalances back to both masters.
+
+**Kill a Thunder GPU mid-test:**
+```powershell
+echo "pkill -9 -f thunder_worker:app; tmux kill-session -t gpu0" | tnr connect 0
+```
+The master sees in-flight requests fail with `transport_RemoteProtocolError`, retries on the surviving GPU. After `STALE_AFTER_SEC` (60 s), the dead worker drops out of the registry. Bring it back with `.\scripts\redeploy.ps1 -Force`.
+
+See [`onboard.md`](onboard.md#test-scripts) for the scripted versions of these tests.
+
+---
+
+## Quick reference
+
+| Component | How to start | Where it logs | How it dies cleanly |
+|---|---|---|---|
+| Local stack | `docker compose up -d` | `docker compose logs <service>` | `docker compose down` |
+| Test UI | `python -m client.app` | the same terminal | Ctrl-C |
+| cloudflared × 2 | `cloudflared tunnel --url http://localhost:7001` (and `:7002`) | the same terminals | Ctrl-C in each terminal |
+| Thunder workers | `.\scripts\redeploy.ps1` | `tmux attach -t gpu0` on the instance | `echo "tmux kill-server; pkill -9 -f thunder_worker" \| tnr connect <id>` |
+
+| Service | Host port | Internal port |
+|---|---|---|
+| NGINX (public entry) | `8008` | 8008 |
+| master1 | `7001` | 7000 |
+| master2 | `7002` | 7000 |
+| rag | — (via nginx /rag/) | 8090 |
+| qdrant | `6333` | 6333 |
+| cpu_worker_1_1 | `9001` | 9001 |
+| cpu_worker_2_1 | `9002` | 9001 |
+| client UI | `8050` | n/a (host process) |
+| Thunder workers | n/a — public HTTPS via `tnr ports forward` | 8000 |
 
 ---
 
 ## Technologies Used
 
-- **Python 3.10+**
-- **PyTorch + HuggingFace Transformers** — LLM inference (Qwen 2.5 0.5B local, Llama 3.1 8B Instruct on Thunder)
-- **FastAPI + uvicorn** — masters, CPU workers, Thunder workers, test UI
-- **NGINX** — Layer-7 load balancing across master nodes (least_conn)
+- **Python 3.10+** — all services and tooling
+- **FastAPI + uvicorn** — masters, CPU workers, Thunder workers, RAG service, test UI
+- **PyTorch + HuggingFace transformers** — LLM inference (Qwen 2.5 0.5B local, Llama 3.1 8B Instruct on Thunder)
 - **httpx** — async HTTP between masters and workers
-- **Docker Compose** — local cluster orchestration (masters + nginx + CPU workers)
+- **NGINX** — Layer-7 load balancing across master nodes (least_conn + proxy_next_upstream failover)
+- **Docker Compose** — local cluster orchestration (masters, NGINX, CPU workers, RAG, Qdrant)
+- **Qdrant** — vector database for RAG, with named-volume persistence
+- **sentence-transformers (`all-MiniLM-L6-v2`)** — chunk + prompt embedding for RAG
 - **Thunder Compute** — rented GPU instances for the GPU worker layer
-- **cloudflared** — public quick tunnels exposing masters to remote workers
-- **tnr CLI** — Thunder Compute SSH wrapper with built-in port forwarding (`tnr ports forward` for persistent HTTPS exposure; `tnr connect -t` for ad-hoc laptop-side forwards)
-- **tmux** — keeping worker processes alive across SSH sessions
-- (planned) **ChromaDB + sentence-transformers** for RAG, **Prometheus** for metrics
+- **cloudflared** — public Quick Tunnels exposing laptop masters to remote workers (heartbeats)
+- **tnr CLI** — Thunder SSH wrapper with `tnr ports forward` (persistent public HTTPS to Thunder ports)
+- **tmux** — keeps the Thunder worker processes alive across SSH disconnects
 
 ---
 
 ## Documentation
 
-- [`onboard.md`](onboard.md) — full architecture, Thunder Compute walkthrough, API contract, verification, ports
-- [`workers/thunder/THUNDER_SETUP.md`](workers/thunder/THUNDER_SETUP.md) — full Thunder Compute walkthrough (provisioning, key permissions, `tnr ports forward`, `cloudflared`, `WORKER_DEVICE` GPU pinning, troubleshooting)
-- [`workers/kaggle/KAGGLE_SETUP.md`](workers/kaggle/KAGGLE_SETUP.md) — retired, kept for historical reference
+- [`onboard.md`](onboard.md) — full architecture, request flow, API contract, verification, ports
+- [`workers/thunder/THUNDER_SETUP.md`](workers/thunder/THUNDER_SETUP.md) — comprehensive Thunder Compute walkthrough (provisioning, key permissions, port forwarding, troubleshooting)
+- [`docs/master-scheduler-plan.md`](docs/master-scheduler-plan.md) — design document for the master scheduler
+- [`Report.docx`](Report.docx) — full project report
