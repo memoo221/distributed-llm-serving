@@ -217,6 +217,12 @@ foreach ($inst in $Config.Instances) {
         Write-Output "[$(Tstamp)][inst $($inst.Id)] tnr scp thunder_worker.py..."
         & tnr scp workers/thunder/thunder_worker.py "$($inst.Id):" 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "scp thunder_worker.py failed on $($inst.Id)" }
+        Write-Output "[$(Tstamp)][inst $($inst.Id)] tnr scp thunder_requirements.txt..."
+        # Needed by launch_workers.sh's `pip install -r ...` step. On a fresh
+        # instance (no snapshot) the worker won't start without this — uvicorn,
+        # transformers, etc. aren't preinstalled.
+        & tnr scp workers/thunder/thunder_requirements.txt "$($inst.Id):" 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "scp thunder_requirements.txt failed on $($inst.Id)" }
         Write-Output "[$(Tstamp)][inst $($inst.Id)] tnr scp launch_workers.sh..."
         & tnr scp workers/launch_workers.sh "$($inst.Id):" 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "scp launch_workers.sh failed on $($inst.Id)" }

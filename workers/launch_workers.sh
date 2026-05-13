@@ -36,6 +36,25 @@ if ! command -v tmux >/dev/null 2>&1; then
     sudo apt-get install -y -qq tmux
 fi
 
+# Install Python deps. Idempotent — pip checks versions and short-circuits when
+# everything's already at the right version, so this only costs real time on a
+# fresh Thunder instance (no snapshot). thunder_requirements.txt is scp'd by
+# redeploy.ps1 alongside thunder_worker.py and launch_workers.sh.
+if [ -f /home/ubuntu/thunder_requirements.txt ]; then
+    echo "[launch] ensuring python deps from thunder_requirements.txt (logs -> ~/pip_install.log)..."
+    # Output goes to a file too so the laptop-side redeploy can diagnose
+    # first-run timeouts by tailing ~/pip_install.log on the instance.
+    python3 -m pip install -r /home/ubuntu/thunder_requirements.txt > /home/ubuntu/pip_install.log 2>&1
+    if [ $? -ne 0 ]; then
+        echo "[launch] ERROR: pip install failed — see ~/pip_install.log"
+        tail -n 20 /home/ubuntu/pip_install.log
+        exit 1
+    fi
+    echo "[launch] python deps OK"
+else
+    echo "[launch] WARNING: thunder_requirements.txt missing; assuming deps already present"
+fi
+
 # Stop any running worker processes / tmux sessions.
 tmux kill-server 2>/dev/null || true
 pkill -9 -f "uvicorn thunder_worker" 2>/dev/null || true
